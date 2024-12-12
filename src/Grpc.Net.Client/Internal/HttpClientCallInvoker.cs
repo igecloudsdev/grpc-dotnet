@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -16,14 +16,18 @@
 
 #endregion
 
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using Grpc.Core;
 using Grpc.Net.Client.Internal.Retry;
+using Grpc.Shared;
 
 namespace Grpc.Net.Client.Internal;
 
 /// <summary>
 /// A client-side RPC invocation using HttpClient.
 /// </summary>
+[DebuggerDisplay("{Channel}")]
 internal sealed class HttpClientCallInvoker : CallInvoker
 {
     internal GrpcChannel Channel { get; }
@@ -39,10 +43,12 @@ internal sealed class HttpClientCallInvoker : CallInvoker
     /// </summary>
     public override AsyncClientStreamingCall<TRequest, TResponse> AsyncClientStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options)
     {
+        AssertMethodType(method, MethodType.ClientStreaming);
+
         var call = CreateRootGrpcCall<TRequest, TResponse>(Channel, method, options);
         call.StartClientStreaming();
 
-        return new AsyncClientStreamingCall<TRequest, TResponse>(
+        var callWrapper = new AsyncClientStreamingCall<TRequest, TResponse>(
             requestStream: call.ClientStreamWriter!,
             responseAsync: call.GetResponseAsync(),
             responseHeadersAsync: Callbacks<TRequest, TResponse>.GetResponseHeadersAsync,
@@ -50,6 +56,10 @@ internal sealed class HttpClientCallInvoker : CallInvoker
             getTrailersFunc: Callbacks<TRequest, TResponse>.GetTrailers,
             disposeAction: Callbacks<TRequest, TResponse>.Dispose,
             call);
+
+        PrepareForDebugging(call, callWrapper);
+
+        return callWrapper;
     }
 
     /// <summary>
@@ -59,10 +69,12 @@ internal sealed class HttpClientCallInvoker : CallInvoker
     /// </summary>
     public override AsyncDuplexStreamingCall<TRequest, TResponse> AsyncDuplexStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options)
     {
+        AssertMethodType(method, MethodType.DuplexStreaming);
+
         var call = CreateRootGrpcCall<TRequest, TResponse>(Channel, method, options);
         call.StartDuplexStreaming();
 
-        return new AsyncDuplexStreamingCall<TRequest, TResponse>(
+        var callWrapper = new AsyncDuplexStreamingCall<TRequest, TResponse>(
             requestStream: call.ClientStreamWriter!,
             responseStream: call.ClientStreamReader!,
             responseHeadersAsync: Callbacks<TRequest, TResponse>.GetResponseHeadersAsync,
@@ -70,6 +82,10 @@ internal sealed class HttpClientCallInvoker : CallInvoker
             getTrailersFunc: Callbacks<TRequest, TResponse>.GetTrailers,
             disposeAction: Callbacks<TRequest, TResponse>.Dispose,
             call);
+
+        PrepareForDebugging(call, callWrapper);
+
+        return callWrapper;
     }
 
     /// <summary>
@@ -78,16 +94,22 @@ internal sealed class HttpClientCallInvoker : CallInvoker
     /// </summary>
     public override AsyncServerStreamingCall<TResponse> AsyncServerStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
     {
+        AssertMethodType(method, MethodType.ServerStreaming);
+
         var call = CreateRootGrpcCall<TRequest, TResponse>(Channel, method, options);
         call.StartServerStreaming(request);
 
-        return new AsyncServerStreamingCall<TResponse>(
+        var callWrapper = new AsyncServerStreamingCall<TResponse>(
             responseStream: call.ClientStreamReader!,
             responseHeadersAsync: Callbacks<TRequest, TResponse>.GetResponseHeadersAsync,
             getStatusFunc: Callbacks<TRequest, TResponse>.GetStatus,
             getTrailersFunc: Callbacks<TRequest, TResponse>.GetTrailers,
             disposeAction: Callbacks<TRequest, TResponse>.Dispose,
             call);
+
+        PrepareForDebugging(call, callWrapper);
+
+        return callWrapper;
     }
 
     /// <summary>
@@ -95,16 +117,32 @@ internal sealed class HttpClientCallInvoker : CallInvoker
     /// </summary>
     public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
     {
+        AssertMethodType(method, MethodType.Unary);
+
         var call = CreateRootGrpcCall<TRequest, TResponse>(Channel, method, options);
         call.StartUnary(request);
 
-        return new AsyncUnaryCall<TResponse>(
+        var callWrapper = new AsyncUnaryCall<TResponse>(
             responseAsync: call.GetResponseAsync(),
             responseHeadersAsync: Callbacks<TRequest, TResponse>.GetResponseHeadersAsync,
             getStatusFunc: Callbacks<TRequest, TResponse>.GetStatus,
             getTrailersFunc: Callbacks<TRequest, TResponse>.GetTrailers,
             disposeAction: Callbacks<TRequest, TResponse>.Dispose,
             call);
+
+        PrepareForDebugging(call, callWrapper);
+
+        return callWrapper;
+    }
+
+    [Conditional("ASSERT_METHOD_TYPE")]
+    private static void AssertMethodType(IMethod method, MethodType methodType)
+    {
+        // This can be used to assert tests are passing the right method type.
+        if (method.Type != methodType)
+        {
+            throw new Exception("Expected method type: " + methodType);
+        }
     }
 
     /// <summary>
@@ -138,25 +176,50 @@ internal sealed class HttpClientCallInvoker : CallInvoker
         else
         {
             // No retry/hedge policy configured. Fast path!
-            return CreateGrpcCall<TRequest, TResponse>(channel, method, options, attempt: 1);
+            // Note that callWrapper is null here and will be set later.
+            return CreateGrpcCall<TRequest, TResponse>(channel, method, options, attempt: 1, forceAsyncHttpResponse: false, callWrapper: null);
         }
+    }
+
+    private void PrepareForDebugging<TRequest, TResponse>(IGrpcCall<TRequest, TResponse> call, object callWrapper)
+        where TRequest : class
+        where TResponse : class
+    {
+        if (Channel.Debugger.IsAttached)
+        {
+            // By default, the debugger can't access a property that runs across threads.
+            // See https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.debugger.notifyofcrossthreaddependency
+            //
+            // The ResponseHeadersAsync task is lazy and is only started if accessed. Trying to initiate the lazy task from
+            // the debugger isn't allowed and the debugger requires you to opt-in to run it. Not a good experience.
+            //
+            // If the debugger is attached then we don't care about performance saving of making ResponseHeadersAsync lazy.
+            // Instead, start the ResponseHeadersAsync task with the call. This is in regular app execution so there is no problem
+            // doing it here. Now the response headers are automatically available when debugging.
+            //
+            // Start the ResponseHeadersAsync task.
+            _ = call.GetResponseHeadersAsync();
+        }
+
+        // CallWrapper is set as a property because there is a circular relationship between the underlying call and the call wrapper.
+        call.CallWrapper = callWrapper;
     }
 
     public static GrpcCall<TRequest, TResponse> CreateGrpcCall<TRequest, TResponse>(
         GrpcChannel channel,
         Method<TRequest, TResponse> method,
         CallOptions options,
-        int attempt)
+        int attempt,
+        bool forceAsyncHttpResponse,
+        object? callWrapper)
         where TRequest : class
         where TResponse : class
     {
-        if (channel.Disposed)
-        {
-            throw new ObjectDisposedException(nameof(GrpcChannel));
-        }
+        ObjectDisposedThrowHelper.ThrowIf(channel.Disposed, typeof(GrpcChannel));
 
         var methodInfo = channel.GetCachedGrpcMethodInfo(method);
-        var call = new GrpcCall<TRequest, TResponse>(method, methodInfo, options, channel, attempt);
+        var call = new GrpcCall<TRequest, TResponse>(method, methodInfo, options, channel, attempt, forceAsyncHttpResponse);
+        call.CallWrapper = callWrapper;
 
         return call;
     }

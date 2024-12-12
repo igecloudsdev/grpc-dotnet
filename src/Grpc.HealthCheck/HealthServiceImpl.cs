@@ -14,13 +14,10 @@
 // limitations under the License.
 #endregion
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Threading.Channels;
-using System.Threading.Tasks;
 
 using Grpc.Core;
+using Grpc.Core.Utils;
 using Grpc.Health.V1;
 
 namespace Grpc.HealthCheck;
@@ -144,6 +141,13 @@ public class HealthServiceImpl : Grpc.Health.V1.Health.HealthBase
     /// <returns>A task indicating completion of the handler.</returns>
     public override async Task Watch(HealthCheckRequest request, IServerStreamWriter<HealthCheckResponse> responseStream, ServerCallContext context)
     {
+        // The call has already been canceled. Writing to the response will fail so immediately exit.
+        // In the real world this situation is unlikely to happen as the server would have prevented a canceled call from making it this far.
+        if (context.CancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
         string service = request.Service;
 
         // Channel is used to to marshall multiple callers updating status into a single queue.
@@ -160,7 +164,7 @@ public class HealthServiceImpl : Grpc.Health.V1.Health.HealthBase
 
         lock (watchersLock)
         {
-            if (!watchers.TryGetValue(service, out List<ChannelWriter<HealthCheckResponse>> channelWriters))
+            if (!watchers.TryGetValue(service, out List<ChannelWriter<HealthCheckResponse>>? channelWriters))
             {
                 channelWriters = new List<ChannelWriter<HealthCheckResponse>>();
                 watchers.Add(service, channelWriters);
@@ -173,7 +177,7 @@ public class HealthServiceImpl : Grpc.Health.V1.Health.HealthBase
         context.CancellationToken.Register(() => {
             lock (watchersLock)
             {
-                if (watchers.TryGetValue(service, out List<ChannelWriter<HealthCheckResponse>> channelWriters))
+                if (watchers.TryGetValue(service, out List<ChannelWriter<HealthCheckResponse>>? channelWriters))
                 {
                     // Remove the writer from the watchers
                     if (channelWriters.Remove(channel.Writer))
@@ -199,7 +203,7 @@ public class HealthServiceImpl : Grpc.Health.V1.Health.HealthBase
         // Loop will exit when the call is canceled and the writer is marked as complete.
         while (await channel.Reader.WaitToReadAsync().ConfigureAwait(false))
         {
-            if (channel.Reader.TryRead(out HealthCheckResponse item))
+            if (channel.Reader.TryRead(out HealthCheckResponse? item))
             {
                 await responseStream.WriteAsync(item).ConfigureAwait(false);
             }
@@ -210,7 +214,7 @@ public class HealthServiceImpl : Grpc.Health.V1.Health.HealthBase
     {
         lock (watchersLock)
         {
-            if (watchers.TryGetValue(service, out List<ChannelWriter<HealthCheckResponse>> channelWriters))
+            if (watchers.TryGetValue(service, out List<ChannelWriter<HealthCheckResponse>>? channelWriters))
             {
                 HealthCheckResponse response = new HealthCheckResponse { Status = status };
 
@@ -227,11 +231,10 @@ public class HealthServiceImpl : Grpc.Health.V1.Health.HealthBase
 
     private HealthCheckResponse GetHealthCheckResponse(string service, bool throwOnNotFound)
     {
-        HealthCheckResponse response = null;
+        HealthCheckResponse response;
         lock (statusLock)
         {
-            HealthCheckResponse.Types.ServingStatus status;
-            if (!statusMap.TryGetValue(service, out status))
+            if (!statusMap.TryGetValue(service, out HealthCheckResponse.Types.ServingStatus status))
             {
                 if (throwOnNotFound)
                 {
@@ -251,6 +254,7 @@ public class HealthServiceImpl : Grpc.Health.V1.Health.HealthBase
 
     private HealthCheckResponse.Types.ServingStatus GetServiceStatus(string service)
     {
+        GrpcPreconditions.CheckNotNull(service, nameof(service));
         if (statusMap.TryGetValue(service, out HealthCheckResponse.Types.ServingStatus s))
         {
             return s;

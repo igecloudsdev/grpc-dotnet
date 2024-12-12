@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -22,7 +22,7 @@ using Microsoft.Extensions.Options;
 
 namespace Grpc.AspNetCore.Server.Internal;
 
-internal class GrpcServiceOptionsSetup : IConfigureOptions<GrpcServiceOptions>
+internal sealed class GrpcServiceOptionsSetup : IConfigureOptions<GrpcServiceOptions>
 {
     // Default to no send limit and 4mb receive limit.
     // Matches the gRPC C impl defaults
@@ -39,14 +39,13 @@ internal class GrpcServiceOptionsSetup : IConfigureOptions<GrpcServiceOptions>
         if (options._compressionProviders == null || options._compressionProviders.Count == 0)
         {
             options.CompressionProviders.Add(new GzipCompressionProvider(CompressionLevel.Fastest));
-#if NET6_0_OR_GREATER
+
             options.CompressionProviders.Add(new DeflateCompressionProvider(CompressionLevel.Fastest));
-#endif
         }
     }
 }
 
-internal class GrpcServiceOptionsSetup<TService> : IConfigureOptions<GrpcServiceOptions<TService>> where TService : class
+internal sealed class GrpcServiceOptionsSetup<TService> : IConfigureOptions<GrpcServiceOptions<TService>> where TService : class
 {
     private readonly GrpcServiceOptions _options;
 

@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -16,29 +16,13 @@
 
 #endregion
 
-using Grpc.AspNetCore.Server;
+#if SUPPORT_LOAD_BALANCING
+namespace Grpc.Net.Client.Balancer.Internal;
 
-namespace Server;
-
-public class Startup
+internal sealed class ChannelIdProvider
 {
-    public void ConfigureServices(IServiceCollection services)
-    {
-        services.AddGrpc();
-    }
+    private long _currentChannelId;
 
-    public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
-    {
-        if (env.IsDevelopment())
-        {
-            app.UseDeveloperExceptionPage();
-        }
-
-        app.UseRouting();
-
-        app.UseEndpoints(endpoints =>
-        {
-            endpoints.MapGrpcService<GreeterService>();
-        });
-    }
+    public long GetNextChannelId() => Interlocked.Increment(ref _currentChannelId);
 }
+#endif

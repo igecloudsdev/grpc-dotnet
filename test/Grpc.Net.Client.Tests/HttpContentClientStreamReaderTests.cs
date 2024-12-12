@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -231,7 +231,8 @@ public class HttpContentClientStreamReaderTests
             new GrpcMethodInfo(new GrpcCallScope(ClientTestHelpers.ServiceMethod.Type, uri), uri, methodConfig: null),
             new CallOptions(),
             channel,
-            attemptCount: 0);
+            attemptCount: 0,
+            forceAsyncHttpResponse: false);
     }
 
     private static GrpcChannel CreateChannel(HttpClient httpClient, ILoggerFactory? loggerFactory = null, bool? throwOperationCanceledOnCancellation = null)
@@ -291,7 +292,7 @@ public class HttpContentClientStreamReaderTests
             throw new NotImplementedException();
         }
 
-#if !NET472
+#if !NET462
         public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
             return new ValueTask<int>(Task.FromException<int>(new IOException("Test")));

@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -22,8 +22,6 @@ using Grpc.Core;
 using Grpc.Net.Client.Tests.Infrastructure;
 using Grpc.Tests.Shared;
 using NUnit.Framework;
-
-#if !NET472
 
 namespace Grpc.Net.Client.Tests;
 
@@ -51,7 +49,7 @@ public class ReadAllAsyncTests
         var invoker = HttpClientCallInvokerFactory.Create(httpClient);
 
         // Act
-        var call = invoker.AsyncServerStreamingCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest());
+        var call = invoker.AsyncServerStreamingCall(new HelloRequest());
 
         var messages = new List<string>();
         await foreach (var item in call.ResponseStream.ReadAllAsync().DefaultTimeout())
@@ -97,7 +95,7 @@ public class ReadAllAsyncTests
         var cts = new CancellationTokenSource();
 
         // Act
-        var call = invoker.AsyncServerStreamingCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest());
+        var call = invoker.AsyncServerStreamingCall(new HelloRequest());
 
         var messages = new List<string>();
         var ex = await ExceptionAssert.ThrowsAsync<RpcException>(async () =>
@@ -138,7 +136,7 @@ public class ReadAllAsyncTests
         var cts = new CancellationTokenSource();
 
         // Act
-        var call = invoker.AsyncServerStreamingCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest());
+        var call = invoker.AsyncServerStreamingCall(new HelloRequest());
 
         var messages = new List<string>();
         var ex = await ExceptionAssert.ThrowsAsync<RpcException>(async () =>
@@ -178,7 +176,7 @@ public class ReadAllAsyncTests
         var invoker = HttpClientCallInvokerFactory.Create(httpClient);
 
         // Act
-        var call = invoker.AsyncServerStreamingCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest());
+        var call = invoker.AsyncServerStreamingCall(new HelloRequest());
 
         var enumerator = call.ResponseStream.ReadAllAsync().GetAsyncEnumerator();
 
@@ -218,7 +216,7 @@ public class ReadAllAsyncTests
         var cts = new CancellationTokenSource();
 
         // Act
-        var call = invoker.AsyncServerStreamingCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(cancellationToken: cts.Token), new HelloRequest());
+        var call = invoker.AsyncServerStreamingCall(new HelloRequest(), new CallOptions(cancellationToken: cts.Token));
 
         var enumerator = call.ResponseStream.ReadAllAsync().GetAsyncEnumerator();
 
@@ -258,7 +256,7 @@ public class ReadAllAsyncTests
         var cts = new CancellationTokenSource();
 
         // Act
-        var call = invoker.AsyncServerStreamingCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(cancellationToken: cts.Token), new HelloRequest());
+        var call = invoker.AsyncServerStreamingCall(new HelloRequest(), new CallOptions(cancellationToken: cts.Token));
 
         var enumerator = call.ResponseStream.ReadAllAsync().GetAsyncEnumerator();
 
@@ -275,5 +273,3 @@ public class ReadAllAsyncTests
         Assert.AreEqual(StatusCode.Cancelled, call.GetStatus().StatusCode);
     }
 }
-
-#endif

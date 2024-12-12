@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -63,6 +63,7 @@ class Program
     {
         var urlOption = new Option<Uri>(new string[] { "-u", "--url" }, "The server url to request") { IsRequired = true };
         var udsFileNameOption = new Option<string>(new string[] { "--udsFileName" }, "The Unix Domain Socket file name");
+        var namedPipeNameOption = new Option<string>(new string[] { "--namedPipeName" }, "The Named Pipe name");
         var connectionsOption = new Option<int>(new string[] { "-c", "--connections" }, () => 1, "Total number of connections to keep open");
         var warmupOption = new Option<int>(new string[] { "-w", "--warmup" }, () => 5, "Duration of the warmup in seconds");
         var durationOption = new Option<int>(new string[] { "-d", "--duration" }, () => 10, "Duration of the test in seconds");
@@ -81,6 +82,7 @@ class Program
         var rootCommand = new RootCommand();
         rootCommand.AddOption(urlOption);
         rootCommand.AddOption(udsFileNameOption);
+        rootCommand.AddOption(namedPipeNameOption);
         rootCommand.AddOption(connectionsOption);
         rootCommand.AddOption(warmupOption);
         rootCommand.AddOption(durationOption);
@@ -101,6 +103,7 @@ class Program
             _options = new ClientOptions();
             _options.Url = context.ParseResult.GetValueForOption(urlOption);
             _options.UdsFileName = context.ParseResult.GetValueForOption(udsFileNameOption);
+            _options.NamedPipeName = context.ParseResult.GetValueForOption(namedPipeNameOption);
             _options.Connections = context.ParseResult.GetValueForOption(connectionsOption);
             _options.Warmup = context.ParseResult.GetValueForOption(warmupOption);
             _options.Duration = context.ParseResult.GetValueForOption(durationOption);
@@ -462,10 +465,6 @@ class Program
                 var address = useTls ? "https://" : "http://";
                 address += target;
 
-#if NETCOREAPP3_1
-                AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
-#endif
-
                 var httpClientHandler = new SocketsHttpHandler();
                 httpClientHandler.UseProxy = false;
                 httpClientHandler.AllowAutoRedirect = false;
@@ -473,42 +472,41 @@ class Program
                 {
                     var basePath = Path.GetDirectoryName(AppContext.BaseDirectory);
                     var certPath = Path.Combine(basePath!, "Certs", "client.pfx");
-                    var clientCertificate = new X509Certificate2(certPath, "1111");
-                    httpClientHandler.SslOptions.ClientCertificates = new X509CertificateCollection
-                    {
-                        clientCertificate
-                    };
+                    var clientCertificates = X509CertificateLoader.LoadPkcs12CollectionFromFile(certPath, "1111");
+                    httpClientHandler.SslOptions.ClientCertificates = clientCertificates;
                 }
-#if NET5_0_OR_GREATER
+
                 if (!string.IsNullOrEmpty(_options.UdsFileName))
                 {
                     var connectionFactory = new UnixDomainSocketConnectionFactory(new UnixDomainSocketEndPoint(ResolveUdsPath(_options.UdsFileName)));
                     httpClientHandler.ConnectCallback = connectionFactory.ConnectAsync;
                 }
-#endif
+                else if (!string.IsNullOrEmpty(_options.NamedPipeName))
+                {
+                    var connectionFactory = new NamedPipeConnectionFactory(_options.NamedPipeName);
+                    httpClientHandler.ConnectCallback = connectionFactory.ConnectAsync;
+                }
 
                 httpClientHandler.SslOptions.RemoteCertificateValidationCallback =
                     (object sender, X509Certificate? certificate, X509Chain? chain, SslPolicyErrors sslPolicyErrors) => true;
 
                 HttpMessageHandler httpMessageHandler = httpClientHandler;
 
+                Version? versionOverride = null;
                 if (_options.Protocol == "h3")
                 {
                     // Stop gRPC channel from creating TCP socket.
                     httpClientHandler.ConnectCallback = (context, cancellationToken) => throw new InvalidOperationException("Should never be called for H3.");
 
                     // Force H3 on all requests.
-                    httpMessageHandler = new Http3DelegatingHandler(httpMessageHandler);
+                    versionOverride = new Version(3, 0);
                 }
 
                 return GrpcChannel.ForAddress(address, new GrpcChannelOptions
                 {
-#if NET5_0_OR_GREATER
                     HttpHandler = httpMessageHandler,
-#else
-                    HttpClient = new HttpClient(httpMessageHandler),
-#endif
-                    LoggerFactory = _loggerFactory
+                    LoggerFactory = _loggerFactory,
+                    HttpVersion = versionOverride
                 });
         }
     }
@@ -753,22 +751,5 @@ class Program
     private static bool IsCallCountExceeded()
     {
         return _options.CallCount != null && _callsStarted > _options.CallCount;
-    }
-
-    private class Http3DelegatingHandler : DelegatingHandler
-    {
-        private static readonly Version Http3Version = new Version(3, 0);
-
-        public Http3DelegatingHandler(HttpMessageHandler innerHandler)
-        {
-            InnerHandler = innerHandler;
-        }
-
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            request.Version = Http3Version;
-            request.VersionPolicy = HttpVersionPolicy.RequestVersionExact;
-            return base.SendAsync(request, cancellationToken);
-        }
     }
 }

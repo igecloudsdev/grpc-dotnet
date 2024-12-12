@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -16,7 +16,6 @@
 
 #endregion
 
-using System.Diagnostics;
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
 using Log = Grpc.Net.Client.Internal.ClientStreamWriterBaseLog;
@@ -71,37 +70,20 @@ internal abstract class ClientStreamWriterBase<TRequest> : IClientStreamWriter<T
     {
         get
         {
-            Debug.Assert(Monitor.IsEntered(WriteLock));
-
             var writeTask = WriteTask;
             return writeTask != null && !writeTask.IsCompleted;
         }
     }
 }
 
-internal static class ClientStreamWriterBaseLog
+internal static partial class ClientStreamWriterBaseLog
 {
-    private static readonly Action<ILogger, Exception?> _completingClientStream =
-        LoggerMessage.Define(LogLevel.Debug, new EventId(1, "CompletingClientStream"), "Completing client stream.");
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 1, EventName = "CompletingClientStream", Message = "Completing client stream.")]
+    public static partial void CompletingClientStream(ILogger logger);
 
-    private static readonly Action<ILogger, Exception?> _writeMessageError =
-        LoggerMessage.Define(LogLevel.Error, new EventId(2, "WriteMessageError"), "Error writing message.");
+    [LoggerMessage(Level = LogLevel.Error, EventId = 2, EventName = "WriteMessageError", Message = "Error writing message.")]
+    public static partial void WriteMessageError(ILogger logger, Exception ex);
 
-    private static readonly Action<ILogger, Exception?> _completeClientStreamError =
-        LoggerMessage.Define(LogLevel.Error, new EventId(3, "CompleteClientStreamError"), "Error completing client stream.");
-
-    public static void CompletingClientStream(ILogger logger)
-    {
-        _completingClientStream(logger, null);
-    }
-
-    public static void WriteMessageError(ILogger logger, Exception ex)
-    {
-        _writeMessageError(logger, ex);
-    }
-
-    public static void CompleteClientStreamError(ILogger logger, Exception ex)
-    {
-        _completeClientStreamError(logger, ex);
-    }
+    [LoggerMessage(Level = LogLevel.Error, EventId = 3, EventName = "CompleteClientStreamError", Message = "Error completing client stream.")]
+    public static partial void CompleteClientStreamError(ILogger logger, Exception ex);
 }

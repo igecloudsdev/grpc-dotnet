@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -23,11 +23,8 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using Grpc.Core;
 using Grpc.Net.Compression;
+using Grpc.Shared;
 using Microsoft.Extensions.Logging;
-
-#if NETSTANDARD2_0
-using ValueTask = System.Threading.Tasks.Task;
-#endif
 
 namespace Grpc.Net.Client.Internal;
 
@@ -41,7 +38,7 @@ internal static partial class StreamExtensions
         return new Status(StatusCode.Unimplemented, $"Unsupported grpc-encoding value '{unsupportedEncoding}'. Supported encodings: {string.Join(", ", supportedEncodings)}");
     }
 
-#if !NETSTANDARD2_0
+#if !NETSTANDARD2_0 && !NET462
     public static async ValueTask<TResponse?> ReadMessageAsync<TResponse>(
 #else
     public static async Task<TResponse?> ReadMessageAsync<TResponse>(
@@ -193,7 +190,7 @@ internal static partial class StreamExtensions
         }
     }
 
-#if NETSTANDARD2_0
+#if NETSTANDARD2_0 || NET462
     public static Task<int> ReadAsync(this Stream stream, Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
         if (MemoryMarshal.TryGetArray<byte>(buffer, out var segment))
@@ -290,7 +287,7 @@ internal static partial class StreamExtensions
         }
     }
 
-    public static async ValueTask WriteMessageAsync<TMessage>(
+    public static async Task WriteMessageAsync<TMessage>(
         this Stream stream,
         GrpcCall call,
         TMessage message,
@@ -316,12 +313,15 @@ internal static partial class StreamExtensions
         }
         catch (Exception ex)
         {
-            GrpcCallLog.ErrorSendingMessage(call.Logger, ex);
-
-            // Cancellation from disposing response while waiting for WriteAsync can throw ObjectDisposedException.
-            if (ex is ObjectDisposedException && call.CancellationToken.IsCancellationRequested)
+            if (!IsCancellationException(ex))
             {
-                throw new OperationCanceledException();
+                // Don't write error when user cancels write
+                GrpcCallLog.ErrorSendingMessage(call.Logger, ex);
+            }
+
+            if (TryCreateCallCompleteException(ex, call, out var statusException))
+            {
+                throw statusException;
             }
 
             throw;
@@ -332,7 +332,7 @@ internal static partial class StreamExtensions
         }
     }
 
-    public static async ValueTask WriteMessageAsync(
+    public static async Task WriteMessageAsync(
         this Stream stream,
         GrpcCall call,
         ReadOnlyMemory<byte> data,
@@ -342,24 +342,47 @@ internal static partial class StreamExtensions
         {
             GrpcCallLog.SendingMessage(call.Logger);
 
-            try
-            {
-                // Sending the header+content in a single WriteAsync call has significant performance benefits
-                // https://github.com/dotnet/runtime/issues/35184#issuecomment-626304981
-                await stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
-            }
-            catch (ObjectDisposedException) when (call.CancellationToken.IsCancellationRequested)
-            {
-                // Cancellation from disposing response while waiting for WriteAsync can throw ObjectDisposedException.
-                throw new OperationCanceledException();
-            }
+            // Sending the header+content in a single WriteAsync call has significant performance benefits
+            // https://github.com/dotnet/runtime/issues/35184#issuecomment-626304981
+            await stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
 
             GrpcCallLog.MessageSent(call.Logger);
         }
         catch (Exception ex)
         {
-            GrpcCallLog.ErrorSendingMessage(call.Logger, ex);
+            if (!IsCancellationException(ex))
+            {
+                // Don't write error when user cancels write
+                GrpcCallLog.ErrorSendingMessage(call.Logger, ex);
+            }
+
+            if (TryCreateCallCompleteException(ex, call, out var statusException))
+            {
+                throw statusException;
+            }
+
             throw;
         }
+    }
+
+    private static bool IsCancellationException(Exception ex) => ex is OperationCanceledException or ObjectDisposedException;
+
+    private static bool TryCreateCallCompleteException(Exception originalException, GrpcCall call, [NotNullWhen(true)] out Exception? exception)
+    {
+        // The call may have been completed while WriteAsync was running and caused WriteAsync to throw.
+        // In this situation, report the call's completed status.
+        //
+        // Replace exception with the status error if:
+        // 1. The original exception is one Stream.WriteAsync throws if the call was completed during a write, and
+        // 2. The call has already been successfully completed.
+        if (IsCancellationException(originalException) &&
+            call.CallTask.IsCompletedSuccessfully())
+        {
+            exception = call.CreateFailureStatusException(call.CallTask.Result);
+            return true;
+        }
+
+        exception = null;
+        return false;
     }
 }

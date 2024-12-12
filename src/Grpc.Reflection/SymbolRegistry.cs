@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 // Copyright 2015 gRPC authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,9 +14,8 @@
 // limitations under the License.
 #endregion
 
-using System.Collections.Generic;
-using Grpc.Core.Utils;
 using Google.Protobuf.Reflection;
+using Grpc.Core.Utils;
 
 namespace Grpc.Reflection;
 
@@ -39,7 +38,7 @@ public class SymbolRegistry
     /// <returns>A symbol registry for the given files.</returns>
     public static SymbolRegistry FromFiles(IEnumerable<FileDescriptor> fileDescriptors)
     {
-        GrpcPreconditions.CheckNotNull(fileDescriptors);
+        GrpcPreconditions.CheckNotNull(fileDescriptors, nameof(fileDescriptors));
         var builder = new Builder();
         foreach (var file in fileDescriptors)
         {
@@ -51,27 +50,25 @@ public class SymbolRegistry
     /// <summary>
     /// Gets file descriptor for given file name (including package path). Returns <c>null</c> if not found.
     /// </summary>
-    public FileDescriptor FileByName(string filename)
+    public FileDescriptor? FileByName(string filename)
     {
-        FileDescriptor file;
-        filesByName.TryGetValue(filename, out file);
+        filesByName.TryGetValue(filename, out var file);
         return file;
     }
 
     /// <summary>
     /// Gets file descriptor that contains definition of given symbol full name (including package path). Returns <c>null</c> if not found.
     /// </summary>
-    public FileDescriptor FileContainingSymbol(string symbol)
+    public FileDescriptor? FileContainingSymbol(string symbol)
     {
-        FileDescriptor file;
-        filesBySymbol.TryGetValue(symbol, out file);
+        filesBySymbol.TryGetValue(symbol, out var file);
         return file;
     }
 
     /// <summary>
     /// Builder class which isn't exposed, but acts as a convenient alternative to passing round two dictionaries in recursive calls.
     /// </summary>
-    private class Builder
+    private sealed class Builder
     {
         private readonly Dictionary<string, FileDescriptor> filesByName;
         private readonly Dictionary<string, FileDescriptor> filesBySymbol;

@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -21,12 +21,12 @@ using Microsoft.Extensions.Logging;
 
 namespace Grpc.Net.Client.Internal.Retry;
 
-internal class ChannelRetryThrottling
+internal sealed partial class ChannelRetryThrottling
 {
     private readonly object _lock = new object();
     private readonly double _tokenRatio;
     private readonly int _maxTokens;
-    private readonly ILogger<ChannelRetryThrottling> _logger;
+    private readonly ILogger _logger;
 
     private double _tokenCount;
     private readonly double _tokenThreshold;
@@ -41,7 +41,7 @@ internal class ChannelRetryThrottling
         _maxTokens = maxTokens;
         _tokenCount = maxTokens;
         _tokenThreshold = _tokenCount / 2;
-        _logger = loggerFactory.CreateLogger<ChannelRetryThrottling>();
+        _logger = loggerFactory.CreateLogger(typeof(ChannelRetryThrottling));
     }
 
     public bool IsRetryThrottlingActive()
@@ -83,14 +83,9 @@ internal class ChannelRetryThrottling
         }
     }
 
-    private static class Log
+    private static partial class Log
     {
-        private static readonly Action<ILogger, bool, Exception?> _retryThrottlingActiveChanged =
-            LoggerMessage.Define<bool>(LogLevel.Trace, new EventId(1, "RetryThrottlingActiveChanged"), "Retry throttling active state changed. New value: {RetryThrottlingActive}");
-
-        public static void RetryThrottlingActiveChanged(ILogger logger, bool isRetryThrottlingActive)
-        {
-            _retryThrottlingActiveChanged(logger, isRetryThrottlingActive, null);
-        }
+        [LoggerMessage(Level = LogLevel.Trace, EventId = 1, EventName = "RetryThrottlingActiveChanged", Message = "Retry throttling active state changed. New value: {RetryThrottlingActive}")]
+        public static partial void RetryThrottlingActiveChanged(ILogger logger, bool retryThrottlingActive);
     }
 }

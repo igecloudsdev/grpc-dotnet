@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -54,6 +54,8 @@ internal sealed partial class HedgingCall<TRequest, TResponse> : RetryCallBase<T
             _delayInterruptTcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
             _hedgingDelayCts = new CancellationTokenSource();
         }
+
+        Channel.RegisterActiveCall(this);
     }
 
     private async Task StartCall(Action<GrpcCall<TRequest, TResponse>> startCallFunc)
@@ -73,7 +75,7 @@ internal sealed partial class HedgingCall<TRequest, TResponse> : RetryCallBase<T
 
                 OnStartingAttempt();
 
-                call = HttpClientCallInvoker.CreateGrpcCall<TRequest, TResponse>(Channel, Method, Options, AttemptCount);
+                call = HttpClientCallInvoker.CreateGrpcCall<TRequest, TResponse>(Channel, Method, Options, AttemptCount, forceAsyncHttpResponse: true, CallWrapper);
                 _activeCalls.Add(call);
 
                 startCallFunc(call);
@@ -127,7 +129,8 @@ internal sealed partial class HedgingCall<TRequest, TResponse> : RetryCallBase<T
 
                 // Wait until the call has finished and then check its status code
                 // to update retry throttling tokens.
-                var status = await call.CallTask.ConfigureAwait(false);
+                // Force yield here to prevent continuation running with any locks.
+                var status = await CompatibilityHelpers.AwaitWithYieldAsync(call.CallTask).ConfigureAwait(false);
                 if (status.StatusCode == StatusCode.OK)
                 {
                     RetryAttemptCallSuccess();
@@ -199,9 +202,19 @@ internal sealed partial class HedgingCall<TRequest, TResponse> : RetryCallBase<T
         {
             if (CommitedCallTask.IsCompletedSuccessfully() && CommitedCallTask.Result == call)
             {
+                // Ensure response task is created before waiting to the end.
+                // Allows cancellation exceptions to be observed in cleanup.
+                if (!HasResponseStream())
+                {
+                    _ = GetResponseAsync();
+                }
+
                 // Wait until the commited call is finished and then clean up hedging call.
-                await call.CallTask.ConfigureAwait(false);
-                Cleanup();
+                // Force yield here to prevent continuation running with any locks.
+                var status = await CompatibilityHelpers.AwaitWithYieldAsync(call.CallTask).ConfigureAwait(false);
+
+                var observeExceptions = status.StatusCode is StatusCode.Cancelled or StatusCode.DeadlineExceeded;
+                Cleanup(observeExceptions);
             }
         }
     }
@@ -363,10 +376,10 @@ internal sealed partial class HedgingCall<TRequest, TResponse> : RetryCallBase<T
 
     protected override void Dispose(bool disposing)
     {
+        base.Dispose(disposing);
+
         lock (Lock)
         {
-            base.Dispose(disposing);
-
             CleanUpUnsynchronized();
         }
     }

@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -19,6 +19,7 @@
 using System.Diagnostics.CodeAnalysis;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.Core;
+using Grpc.Shared;
 
 namespace Grpc.AspNetCore.Server;
 
@@ -32,22 +33,10 @@ public sealed class GrpcMethodMetadata
     /// </summary>
     /// <param name="serviceType">The implementing service type.</param>
     /// <param name="method">The method representation.</param>
-    public GrpcMethodMetadata(
-#if NET5_0_OR_GREATER
-        [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
-#endif
-        Type serviceType,
-        IMethod method)
+    public GrpcMethodMetadata([DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)] Type serviceType, IMethod method)
     {
-        if (serviceType == null)
-        {
-            throw new ArgumentNullException(nameof(serviceType));
-        }
-
-        if (method == null)
-        {
-            throw new ArgumentNullException(nameof(method));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(serviceType);
+        ArgumentNullThrowHelper.ThrowIfNull(method);
 
         ServiceType = serviceType;
         Method = method;
@@ -56,9 +45,7 @@ public sealed class GrpcMethodMetadata
     /// <summary>
     /// Gets the implementing service type.
     /// </summary>
-#if NET5_0_OR_GREATER
     [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
-#endif
     public Type ServiceType { get; }
 
     /// <summary>

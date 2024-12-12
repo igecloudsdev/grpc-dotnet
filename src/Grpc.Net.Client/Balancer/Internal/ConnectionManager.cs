@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -17,17 +17,10 @@
 #endregion
 
 #if SUPPORT_LOAD_BALANCING
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
-using System.Net;
-using System.Threading;
-using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Net.Client.Configuration;
 using Grpc.Net.Client.Internal;
-using Grpc.Shared;
 using Microsoft.Extensions.Logging;
 
 namespace Grpc.Net.Client.Balancer.Internal;
@@ -35,6 +28,7 @@ namespace Grpc.Net.Client.Balancer.Internal;
 internal sealed class ConnectionManager : IDisposable, IChannelControlHelper
 {
     public static readonly BalancerAttributesKey<string> HostOverrideKey = new BalancerAttributesKey<string>("HostOverride");
+    private static readonly ChannelIdProvider _channelIdProvider = new ChannelIdProvider();
 
     private readonly object _lock;
     internal readonly Resolver _resolver;
@@ -42,6 +36,7 @@ internal sealed class ConnectionManager : IDisposable, IChannelControlHelper
     private readonly List<Subchannel> _subchannels;
     private readonly List<StateWatcher> _stateWatchers;
     private readonly TaskCompletionSource<object?> _resolverStartedTcs;
+    private readonly long _channelId;
 
     // Internal for testing
     internal LoadBalancer? _balancer;
@@ -64,8 +59,9 @@ internal sealed class ConnectionManager : IDisposable, IChannelControlHelper
         _lock = new object();
         _nextPickerTcs = new TaskCompletionSource<SubchannelPicker>(TaskCreationOptions.RunContinuationsAsynchronously);
         _resolverStartedTcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _channelId = _channelIdProvider.GetNextChannelId();
 
-        Logger = loggerFactory.CreateLogger<ConnectionManager>();
+        Logger = loggerFactory.CreateLogger(typeof(ConnectionManager));
         LoggerFactory = loggerFactory;
         BackoffPolicyFactory = backoffPolicyFactory;
         _subchannels = new List<Subchannel>();
@@ -92,9 +88,10 @@ internal sealed class ConnectionManager : IDisposable, IChannelControlHelper
         }
     }
 
-    internal int GetNextId()
+    internal string GetNextId()
     {
-        return Interlocked.Increment(ref _currentSubchannelId);
+        var nextSubchannelId = Interlocked.Increment(ref _currentSubchannelId);
+        return $"{_channelId}-{nextSubchannelId}";
     }
 
     public void ConfigureBalancer(Func<IChannelControlHelper, LoadBalancer> configure)
@@ -315,12 +312,20 @@ internal sealed class ConnectionManager : IDisposable, IChannelControlHelper
             {
                 case PickResultType.Complete:
                     var subchannel = result.Subchannel!;
-                    var address = subchannel.CurrentAddress;
+                    var (address, state) = subchannel.GetAddressAndState();
 
                     if (address != null)
                     {
-                        ConnectionManagerLog.PickResultSuccessful(Logger, subchannel.Id, address);
-                        return (subchannel, address, result.SubchannelCallTracker);
+                        if (state == ConnectivityState.Ready)
+                        {
+                            ConnectionManagerLog.PickResultSuccessful(Logger, subchannel.Id, address, subchannel.Transport.TransportStatus);
+                            return (subchannel, address, result.SubchannelCallTracker);
+                        }
+                        else
+                        {
+                            ConnectionManagerLog.PickResultSubchannelNotReady(Logger, subchannel.Id, address, state);
+                            previousPicker = currentPicker;
+                        }
                     }
                     else
                     {
@@ -464,106 +469,54 @@ internal sealed class ConnectionManager : IDisposable, IChannelControlHelper
     }
 }
 
-internal static class ConnectionManagerLog
+internal static partial class ConnectionManagerLog
 {
-    private static readonly Action<ILogger, string, Exception?> _resolverUnsupportedLoadBalancingConfig =
-        LoggerMessage.Define<string>(LogLevel.Warning, new EventId(1, "ResolverUnsupportedLoadBalancingConfig"), "Service config returned by the resolver contains unsupported load balancer policies: {LoadBalancingConfigs}. Load balancer unchanged.");
-
-    private static readonly Action<ILogger, Exception?> _resolverServiceConfigNotUsed =
-        LoggerMessage.Define(LogLevel.Debug, new EventId(2, "ResolverServiceConfigNotUsed"), "Service config returned by the resolver not used.");
-
-    private static readonly Action<ILogger, ConnectivityState, Exception?> _channelStateUpdated =
-        LoggerMessage.Define<ConnectivityState>(LogLevel.Debug, new EventId(3, "ChannelStateUpdated"), "Channel state updated to {State}.");
-
-    private static readonly Action<ILogger, Exception?> _channelPickerUpdated =
-        LoggerMessage.Define(LogLevel.Debug, new EventId(4, "ChannelPickerUpdated"), "Channel picker updated.");
-
-    private static readonly Action<ILogger, Exception?> _pickStarted =
-        LoggerMessage.Define(LogLevel.Trace, new EventId(5, "PickStarted"), "Pick started.");
-
-    private static readonly Action<ILogger, int, BalancerAddress, Exception?> _pickResultSuccessful =
-        LoggerMessage.Define<int, BalancerAddress>(LogLevel.Debug, new EventId(6, "PickResultSuccessful"), "Successfully picked subchannel id '{SubchannelId}' with address {CurrentAddress}.");
-
-    private static readonly Action<ILogger, int, Exception?> _pickResultSubchannelNoCurrentAddress =
-        LoggerMessage.Define<int>(LogLevel.Debug, new EventId(7, "PickResultSubchannelNoCurrentAddress"), "Picked subchannel id '{SubchannelId}' doesn't have a current address.");
-
-    private static readonly Action<ILogger, Exception?> _pickResultQueued =
-        LoggerMessage.Define(LogLevel.Debug, new EventId(8, "PickResultQueued"), "Picked queued.");
-
-    private static readonly Action<ILogger, Status, Exception?> _pickResultFailure =
-        LoggerMessage.Define<Status>(LogLevel.Debug, new EventId(9, "PickResultFailure"), "Picked failure with status: {Status}");
-
-    private static readonly Action<ILogger, Status, Exception?> _pickResultFailureWithWaitForReady =
-        LoggerMessage.Define<Status>(LogLevel.Debug, new EventId(10, "PickResultFailureWithWaitForReady"), "Picked failure with status: {Status}. Retrying because wait for ready is enabled.");
-
-    private static readonly Action<ILogger, Exception?> _pickWaiting =
-        LoggerMessage.Define(LogLevel.Trace, new EventId(11, "PickWaiting"), "Waiting for a new picker.");
-
-    private static readonly Action<ILogger, Status, Exception?> _resolverServiceConfigFallback =
-        LoggerMessage.Define<Status>(LogLevel.Debug, new EventId(12, "ResolverServiceConfigFallback"), "Falling back to previously loaded service config. Resolver failure when retreiving or parsing service config with status: {Status}");
+    [LoggerMessage(Level = LogLevel.Warning, EventId = 1, EventName = "ResolverUnsupportedLoadBalancingConfig", Message = "Service config returned by the resolver contains unsupported load balancer policies: {LoadBalancingConfigs}. Load balancer unchanged.")]
+    private static partial void ResolverUnsupportedLoadBalancingConfig(ILogger logger, string loadBalancingConfigs);
 
     public static void ResolverUnsupportedLoadBalancingConfig(ILogger logger, IList<LoadBalancingConfig> loadBalancingConfigs)
     {
         if (logger.IsEnabled(LogLevel.Warning))
         {
             var loadBalancingConfigText = string.Join(", ", loadBalancingConfigs.Select(c => $"'{c.PolicyName}'"));
-            _resolverUnsupportedLoadBalancingConfig(logger, loadBalancingConfigText, null);
+            ResolverUnsupportedLoadBalancingConfig(logger, loadBalancingConfigText);
         }
     }
 
-    public static void ResolverServiceConfigNotUsed(ILogger logger)
-    {
-        _resolverServiceConfigNotUsed(logger, null);
-    }
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 2, EventName = "ResolverServiceConfigNotUsed", Message = "Service config returned by the resolver not used.")]
+    public static partial void ResolverServiceConfigNotUsed(ILogger logger);
 
-    public static void ChannelStateUpdated(ILogger logger, ConnectivityState connectivityState)
-    {
-        _channelStateUpdated(logger, connectivityState, null);
-    }
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 3, EventName = "ChannelStateUpdated", Message = "Channel state updated to {State}.")]
+    public static partial void ChannelStateUpdated(ILogger logger, ConnectivityState state);
 
-    public static void ChannelPickerUpdated(ILogger logger)
-    {
-        _channelPickerUpdated(logger, null);
-    }
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 4, EventName = "ChannelPickerUpdated", Message = "Channel picker updated.")]
+    public static partial void ChannelPickerUpdated(ILogger logger);
 
-    public static void PickStarted(ILogger logger)
-    {
-        _pickStarted(logger, null);
-    }
+    [LoggerMessage(Level = LogLevel.Trace, EventId = 5, EventName = "PickStarted", Message = "Pick started.")]
+    public static partial void PickStarted(ILogger logger);
 
-    public static void PickResultSuccessful(ILogger logger, int subchannelId, BalancerAddress currentAddress)
-    {
-        _pickResultSuccessful(logger, subchannelId, currentAddress, null);
-    }
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 6, EventName = "PickResultSuccessful", Message = "Successfully picked subchannel id '{SubchannelId}' with address {CurrentAddress}. Transport status: {TransportStatus}")]
+    public static partial void PickResultSuccessful(ILogger logger, string subchannelId, BalancerAddress currentAddress, TransportStatus transportStatus);
 
-    public static void PickResultSubchannelNoCurrentAddress(ILogger logger, int subchannelId)
-    {
-        _pickResultSubchannelNoCurrentAddress(logger, subchannelId, null);
-    }
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 7, EventName = "PickResultSubchannelNoCurrentAddress", Message = "Picked subchannel id '{SubchannelId}' doesn't have a current address.")]
+    public static partial void PickResultSubchannelNoCurrentAddress(ILogger logger, string subchannelId);
 
-    public static void PickResultQueued(ILogger logger)
-    {
-        _pickResultQueued(logger, null);
-    }
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 8, EventName = "PickResultQueued", Message = "Picked queued.")]
+    public static partial void PickResultQueued(ILogger logger);
 
-    public static void PickResultFailure(ILogger logger, Status status)
-    {
-        _pickResultFailure(logger, status, null);
-    }
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 9, EventName = "PickResultFailure", Message = "Picked failure with status: {Status}")]
+    public static partial void PickResultFailure(ILogger logger, Status status);
 
-    public static void PickResultFailureWithWaitForReady(ILogger logger, Status status)
-    {
-        _pickResultFailureWithWaitForReady(logger, status, null);
-    }
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 10, EventName = "PickResultFailureWithWaitForReady", Message = "Picked failure with status: {Status}. Retrying because wait for ready is enabled.")]
+    public static partial void PickResultFailureWithWaitForReady(ILogger logger, Status status);
 
-    public static void PickWaiting(ILogger logger)
-    {
-        _pickWaiting(logger, null);
-    }
+    [LoggerMessage(Level = LogLevel.Trace, EventId = 11, EventName = "PickWaiting", Message = "Waiting for a new picker.")]
+    public static partial void PickWaiting(ILogger logger);
 
-    public static void ResolverServiceConfigFallback(ILogger logger, Status status)
-    {
-        _resolverServiceConfigFallback(logger, status, null);
-    }
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 12, EventName = "ResolverServiceConfigFallback", Message = "Falling back to previously loaded service config. Resolver failure when retreiving or parsing service config with status: {Status}")]
+    public static partial void ResolverServiceConfigFallback(ILogger logger, Status status);
+
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 13, EventName = "PickResultSubchannelNotReady", Message = "Picked subchannel id '{SubchannelId}' with address {CurrentAddress} doesn't have a ready state. Subchannel state: {State}")]
+    public static partial void PickResultSubchannelNotReady(ILogger logger, string subchannelId, BalancerAddress currentAddress, ConnectivityState state);
 }
 #endif

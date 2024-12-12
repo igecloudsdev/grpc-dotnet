@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -23,11 +23,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Grpc.AspNetCore.Server.Internal.CallHandlers;
 
-internal class ServerStreamingServerCallHandler<
-#if NET5_0_OR_GREATER
-    [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
-#endif
-    TService, TRequest, TResponse> : ServerCallHandlerBase<TService, TRequest, TResponse>
+internal sealed class ServerStreamingServerCallHandler<[DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)] TService, TRequest, TResponse> : ServerCallHandlerBase<TService, TRequest, TResponse>
     where TRequest : class
     where TResponse : class
     where TService : class
@@ -44,6 +40,11 @@ internal class ServerStreamingServerCallHandler<
 
     protected override async Task HandleCallAsyncCore(HttpContext httpContext, HttpContextServerCallContext serverCallContext)
     {
+        // Disable certain features for server streaming methods.
+#if NET8_0_OR_GREATER
+        DisableRequestTimeout(httpContext);
+#endif
+
         // Decode request
         var request = await httpContext.Request.BodyReader.ReadSingleMessageAsync<TRequest>(serverCallContext, MethodInvoker.Method.RequestMarshaller.ContextualDeserializer);
 

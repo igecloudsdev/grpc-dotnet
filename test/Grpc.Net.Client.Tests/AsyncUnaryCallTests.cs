@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -20,6 +20,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using Greet;
 using Grpc.Core;
+using Grpc.Core.Interceptors;
 using Grpc.Net.Client.Internal;
 using Grpc.Net.Client.Tests.Infrastructure;
 using Grpc.Shared;
@@ -57,7 +58,7 @@ public class AsyncUnaryCallTests
         var invoker = HttpClientCallInvokerFactory.Create(httpClient);
 
         // Act
-        var rs = await invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest());
+        var rs = await invoker.AsyncUnaryCall(new HelloRequest());
 
         // Assert
         Assert.AreEqual("Hello world", rs.Message);
@@ -104,13 +105,14 @@ public class AsyncUnaryCallTests
 
             return ResponseUtils.CreateResponse(HttpStatusCode.OK, streamContent);
         });
-        // Just need to have a type called WinHttpHandler to activate new behavior.
+
+#pragma warning disable CS0436 // Just need to have a type called WinHttpHandler to activate new behavior.
         var winHttpHandler = new WinHttpHandler(handler);
+#pragma warning restore CS0436
         var invoker = HttpClientCallInvokerFactory.Create(winHttpHandler, "https://localhost");
 
         // Act
-        var rs = await invoker.AsyncUnaryCall<HelloRequest, HelloReply>(
-            ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest { Name = "Hello world" }).ResponseAsync.DefaultTimeout();
+        var rs = await invoker.AsyncUnaryCall(new HelloRequest { Name = "Hello world" }).ResponseAsync.DefaultTimeout();
 
         // Assert
         Assert.AreEqual("Hello world", rs.Message);
@@ -141,8 +143,7 @@ public class AsyncUnaryCallTests
         var invoker = HttpClientCallInvokerFactory.Create(handler, "http://localhost");
 
         // Act
-        var rs = await invoker.AsyncUnaryCall<HelloRequest, HelloReply>(
-            ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest { Name = "World" }).ResponseAsync.DefaultTimeout();
+        var rs = await invoker.AsyncUnaryCall(new HelloRequest { Name = "World" }).ResponseAsync.DefaultTimeout();
 
         // Assert
         Assert.AreEqual("Hello world", rs.Message);
@@ -174,7 +175,7 @@ public class AsyncUnaryCallTests
         var invoker = HttpClientCallInvokerFactory.Create(httpClient);
 
         // Act
-        var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest()).ResponseAsync).DefaultTimeout();
+        var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => invoker.AsyncUnaryCall(new HelloRequest()).ResponseAsync).DefaultTimeout();
 
         // Assert
         Assert.AreEqual(StatusCode.Unimplemented, ex.StatusCode);
@@ -192,7 +193,7 @@ public class AsyncUnaryCallTests
         var invoker = HttpClientCallInvokerFactory.Create(httpClient);
 
         // Act
-        var headers = await invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest()).ResponseHeadersAsync.DefaultTimeout();
+        var headers = await invoker.AsyncUnaryCall(new HelloRequest()).ResponseHeadersAsync.DefaultTimeout();
 
         // Assert
         Assert.AreEqual("true", headers.GetValue("custom"));
@@ -211,7 +212,7 @@ public class AsyncUnaryCallTests
         var invoker = HttpClientCallInvokerFactory.Create(httpClient);
 
         // Act
-        var call = invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest());
+        var call = invoker.AsyncUnaryCall(new HelloRequest());
         var headers = await call.ResponseHeadersAsync.DefaultTimeout();
         var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseAsync).DefaultTimeout();
 
@@ -239,12 +240,16 @@ public class AsyncUnaryCallTests
     }
 
     [Test]
-    [TestCase(0, ResponseHandleAction.ResponseAsync)]
-    [TestCase(0, ResponseHandleAction.ResponseHeadersAsync)]
-    [TestCase(0, ResponseHandleAction.Dispose)]
-    [TestCase(1, ResponseHandleAction.Nothing)]
-    public async Task AsyncUnaryCall_CallFailed_NoUnobservedExceptions(int expectedUnobservedExceptions, ResponseHandleAction action)
+    [TestCase(0, false, ResponseHandleAction.ResponseAsync)]
+    [TestCase(0, true, ResponseHandleAction.ResponseAsync)]
+    [TestCase(0, false, ResponseHandleAction.ResponseHeadersAsync)]
+    [TestCase(0, false, ResponseHandleAction.Dispose)]
+    [TestCase(1, false, ResponseHandleAction.Nothing)]
+    public async Task AsyncUnaryCall_CallFailed_NoUnobservedExceptions(int expectedUnobservedExceptions, bool addClientInterceptor, ResponseHandleAction action)
     {
+        // Do this before running the test to clean up any pending unobserved exceptions from other tests.
+        TriggerUnobservedExceptions();
+
         // Arrange
         var services = new ServiceCollection();
         services.AddNUnitLogger();
@@ -267,26 +272,32 @@ public class AsyncUnaryCallTests
             {
                 throw new Exception("Test error");
             });
-            var invoker = HttpClientCallInvokerFactory.Create(httpClient, loggerFactory: loggerFactory);
+            CallInvoker invoker = HttpClientCallInvokerFactory.Create(httpClient, loggerFactory: loggerFactory);
+            if (addClientInterceptor)
+            {
+                invoker = invoker.Intercept(new ClientLoggerInterceptor(loggerFactory));
+            }
 
             // Act
             logger.LogDebug("Starting call");
             await MakeGrpcCallAsync(logger, invoker, action);
 
             logger.LogDebug("Waiting for finalizers");
-            // Provoke the garbage collector to find the unobserved exception.
-            GC.Collect();
-            // Wait for any failed tasks to be garbage collected
-            GC.WaitForPendingFinalizers();
+            logger.LogDebug("Waiting for finalizers");
+            for (var i = 0; i < 5; i++)
+            {
+                TriggerUnobservedExceptions();
+                await Task.Delay(10);
+            }
 
             // Assert
             Assert.AreEqual(expectedUnobservedExceptions, unobservedExceptions.Count);
 
-            static async Task MakeGrpcCallAsync(ILogger logger, HttpClientCallInvoker invoker, ResponseHandleAction action)
+            static async Task MakeGrpcCallAsync(ILogger logger, CallInvoker invoker, ResponseHandleAction action)
             {
                 var runTask = Task.Run(async () =>
                 {
-                    var call = invoker.AsyncUnaryCall(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest());
+                    var call = invoker.AsyncUnaryCall(new HelloRequest());
 
                     switch (action)
                     {
@@ -312,5 +323,13 @@ public class AsyncUnaryCallTests
         {
             TaskScheduler.UnobservedTaskException -= onUnobservedTaskException;
         }
+    }
+
+    private static void TriggerUnobservedExceptions()
+    {
+        // Provoke the garbage collector to find the unobserved exception.
+        GC.Collect();
+        // Wait for any failed tasks to be garbage collected
+        GC.WaitForPendingFinalizers();
     }
 }

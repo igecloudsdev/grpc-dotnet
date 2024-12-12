@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -429,7 +429,7 @@ public class StreamingTests : FunctionalTestBase
         AssertHasLog(LogLevel.Information, "GrpcStatusError", "Call failed with gRPC error status. Status code: 'Cancelled', Message: ''.");
 
         await TestHelpers.AssertIsTrueRetryAsync(
-            () => HasLog(LogLevel.Error, "ErrorExecutingServiceMethod", "Error when executing service method 'ClientStreamedDataTimeout'."),
+            () => HasLog(LogLevel.Information, "ServiceMethodCanceled", "Service method 'ClientStreamedDataTimeout' canceled."),
             "Wait for server error so it doesn't impact other tests.").DefaultTimeout();
     }
 
@@ -580,7 +580,6 @@ public class StreamingTests : FunctionalTestBase
                 return true;
             }
 
-
             return false;
         });
 
@@ -726,7 +725,6 @@ public class StreamingTests : FunctionalTestBase
             {
                 return true;
             }
-
 
             return false;
         });
@@ -955,7 +953,6 @@ public class StreamingTests : FunctionalTestBase
         Assert.AreEqual(StatusCode.NotFound, ex.StatusCode);
     }
 
-#if NET5_0_OR_GREATER
     [Test]
     public Task MaxConcurrentStreams_StartConcurrently_AdditionalConnectionsCreated()
     {
@@ -1176,7 +1173,9 @@ public class StreamingTests : FunctionalTestBase
 
         Logger.LogInformation("Client reading canceled message from server.");
         var clientEx = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseStream.MoveNext()).DefaultTimeout();
-        Assert.AreEqual(StatusCode.Cancelled, clientEx.StatusCode);
+
+        // Race on the server can change which error is returned.
+        Assert.IsTrue(clientEx.StatusCode == StatusCode.Cancelled || clientEx.StatusCode == StatusCode.Internal);
     }
 
     [Test]
@@ -1322,5 +1321,4 @@ public class StreamingTests : FunctionalTestBase
         Logger.LogInformation("Client waiting for server canceled confirmation.");
         Assert.IsTrue(await serverCanceledTcs.Task.DefaultTimeout());
     }
-#endif
 }

@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -16,10 +16,13 @@
 
 #endregion
 
+using System.Diagnostics.CodeAnalysis;
 using Grpc.AspNetCore.Server;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.AspNetCore.Server.Model;
 using Grpc.AspNetCore.Server.Model.Internal;
+using Grpc.Shared;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
@@ -39,10 +42,7 @@ public static class GrpcServicesExtensions
     /// <returns>The same instance of the <see cref="IGrpcServerBuilder"/> for chaining.</returns>
     public static IGrpcServerBuilder AddServiceOptions<TService>(this IGrpcServerBuilder grpcBuilder, Action<GrpcServiceOptions<TService>> configure) where TService : class
     {
-        if (grpcBuilder == null)
-        {
-            throw new ArgumentNullException(nameof(grpcBuilder));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(grpcBuilder);
 
         grpcBuilder.Services.AddSingleton<IConfigureOptions<GrpcServiceOptions<TService>>, GrpcServiceOptionsSetup<TService>>();
         grpcBuilder.Services.Configure(configure);
@@ -56,12 +56,16 @@ public static class GrpcServicesExtensions
     /// <returns>An <see cref="IGrpcServerBuilder"/> that can be used to further configure the gRPC services.</returns>
     public static IGrpcServerBuilder AddGrpc(this IServiceCollection services)
     {
-        if (services == null)
-        {
-            throw new ArgumentNullException(nameof(services));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(services);
 
-        services.AddRouting();
+#if NET8_0_OR_GREATER
+        // Prefer AddRoutingCore when available.
+        // AddRoutingCore doesn't register a regex constraint and produces smaller result from trimming.
+        services.AddRoutingCore();
+        services.Configure<RouteOptions>(ConfigureRouting);
+#else
+        services.AddRouting(ConfigureRouting);
+#endif
         services.AddOptions();
         services.TryAddSingleton<GrpcMarkerService>();
         services.TryAddSingleton(typeof(ServerCallHandlerFactory<>));
@@ -75,6 +79,24 @@ public static class GrpcServicesExtensions
         services.TryAddEnumerable(ServiceDescriptor.Singleton(typeof(IServiceMethodProvider<>), typeof(BinderServiceMethodProvider<>)));
 
         return new GrpcServerBuilder(services);
+
+        static void ConfigureRouting(RouteOptions options)
+        {
+            // Unimplemented constraint is added to the route as an inline constraint to avoid RoutePatternFactory.Parse overload that includes parameter policies. That overload infers strings as regex constraints, which brings in
+            // the regex engine when publishing trimmed or AOT apps. This change reduces Native AOT gRPC server app size by about 1 MB.
+            AddParameterPolicy<GrpcUnimplementedConstraint>(options, GrpcServerConstants.GrpcUnimplementedConstraintPrefix);
+        }
+
+        // This ensures the policy's constructors are preserved in .NET 6 with trimming. Remove when .NET 6 is no longer supported.
+        static void AddParameterPolicy<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T>(RouteOptions options, string name)
+            where T : IParameterPolicy
+        {
+#if NET7_0_OR_GREATER
+            options.SetParameterPolicy<T>(name);
+#else
+            options.ConstraintMap[name] = typeof(T);
+#endif
+        }
     }
 
     /// <summary>
@@ -85,10 +107,7 @@ public static class GrpcServicesExtensions
     /// <returns>An <see cref="IGrpcServerBuilder"/> that can be used to further configure the gRPC services.</returns>
     public static IGrpcServerBuilder AddGrpc(this IServiceCollection services, Action<GrpcServiceOptions> configureOptions)
     {
-        if (services == null)
-        {
-            throw new ArgumentNullException(nameof(services));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(services);
 
         return services.Configure(configureOptions).AddGrpc();
     }

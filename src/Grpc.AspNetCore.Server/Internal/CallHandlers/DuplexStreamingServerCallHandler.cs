@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -23,11 +23,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Grpc.AspNetCore.Server.Internal.CallHandlers;
 
-internal class DuplexStreamingServerCallHandler<
-#if NET5_0_OR_GREATER
-    [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
-#endif
-    TService, TRequest, TResponse> : ServerCallHandlerBase<TService, TRequest, TResponse>
+internal sealed class DuplexStreamingServerCallHandler<[DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)] TService, TRequest, TResponse> : ServerCallHandlerBase<TService, TRequest, TResponse>
     where TRequest : class
     where TResponse : class
     where TService : class
@@ -44,8 +40,11 @@ internal class DuplexStreamingServerCallHandler<
 
     protected override async Task HandleCallAsyncCore(HttpContext httpContext, HttpContextServerCallContext serverCallContext)
     {
-        // Disable request body data rate for client streaming
+        // Disable certain features for duplex streaming methods.
         DisableMinRequestBodyDataRateAndMaxRequestBodySize(httpContext);
+#if NET8_0_OR_GREATER
+        DisableRequestTimeout(httpContext);
+#endif
 
         var streamReader = new HttpContextStreamReader<TRequest>(serverCallContext, MethodInvoker.Method.RequestMarshaller.ContextualDeserializer);
         var streamWriter = new HttpContextStreamWriter<TResponse>(serverCallContext, MethodInvoker.Method.ResponseMarshaller.ContextualSerializer);

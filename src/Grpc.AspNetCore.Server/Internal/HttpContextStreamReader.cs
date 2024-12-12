@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -16,21 +16,36 @@
 
 #endregion
 
+using System.Diagnostics;
+using System.IO.Pipelines;
 using Grpc.Core;
 using Grpc.Shared;
+using Microsoft.AspNetCore.Http.Features;
 
 namespace Grpc.AspNetCore.Server.Internal;
 
-internal class HttpContextStreamReader<TRequest> : IAsyncStreamReader<TRequest> where TRequest : class
+[DebuggerDisplay("{DebuggerToString(),nq}")]
+[DebuggerTypeProxy(typeof(HttpContextStreamReader<>.HttpContextStreamReaderDebugView))]
+internal sealed class HttpContextStreamReader<TRequest> : IAsyncStreamReader<TRequest> where TRequest : class
 {
     private readonly HttpContextServerCallContext _serverCallContext;
     private readonly Func<DeserializationContext, TRequest> _deserializer;
+    private readonly PipeReader _bodyReader;
+    private readonly IHttpRequestLifetimeFeature _requestLifetimeFeature;
     private bool _completed;
+    private long _readCount;
+    private bool _endOfStream;
 
     public HttpContextStreamReader(HttpContextServerCallContext serverCallContext, Func<DeserializationContext, TRequest> deserializer)
     {
         _serverCallContext = serverCallContext;
         _deserializer = deserializer;
+
+        // Copy HttpContext values.
+        // This is done to avoid a race condition when reading them from HttpContext later when running in a separate thread.
+        _bodyReader = _serverCallContext.HttpContext.Request.BodyReader;
+        // Copy lifetime feature because HttpContext.RequestAborted on .NET 6 doesn't return the real cancellation token.
+        _requestLifetimeFeature = GrpcProtocolHelpers.GetRequestLifetimeFeature(_serverCallContext.HttpContext);
     }
 
     public TRequest Current { get; private set; } = default!;
@@ -49,12 +64,16 @@ internal class HttpContextStreamReader<TRequest> : IAsyncStreamReader<TRequest> 
             return Task.FromCanceled<bool>(cancellationToken);
         }
 
-        if (_completed || _serverCallContext.CancellationToken.IsCancellationRequested)
+        if (_completed || _requestLifetimeFeature.RequestAborted.IsCancellationRequested)
         {
             return Task.FromException<bool>(new InvalidOperationException("Can't read messages after the request is complete."));
         }
 
-        var request = _serverCallContext.HttpContext.Request.BodyReader.ReadStreamMessageAsync(_serverCallContext, _deserializer, cancellationToken);
+        // Clear current before moving next. This prevents rooting the previous value while getting the next one.
+        // In a long running stream this can allow the previous value to be GCed.
+        Current = null!;
+
+        var request = _bodyReader.ReadStreamMessageAsync(_serverCallContext, _deserializer, cancellationToken);
         if (!request.IsCompletedSuccessfully)
         {
             return MoveNextAsync(request);
@@ -70,16 +89,35 @@ internal class HttpContextStreamReader<TRequest> : IAsyncStreamReader<TRequest> 
         // Stream is complete
         if (request == null)
         {
+            _endOfStream = true;
             Current = null!;
             return false;
         }
 
         Current = request;
+        Interlocked.Increment(ref _readCount);
         return true;
     }
 
     public void Complete()
     {
         _completed = true;
+    }
+
+    private string DebuggerToString() => $"ReadCount = {_readCount}, EndOfStream = {(_endOfStream ? "true" : "false")}";
+
+    private sealed class HttpContextStreamReaderDebugView
+    {
+        private readonly HttpContextStreamReader<TRequest> _reader;
+
+        public HttpContextStreamReaderDebugView(HttpContextStreamReader<TRequest> reader)
+        {
+            _reader = reader;
+        }
+
+        public ServerCallContext ServerCallContext => _reader._serverCallContext;
+        public long ReadCount => _reader._readCount;
+        public TRequest Current => _reader.Current;
+        public bool EndOfStream => _reader._endOfStream;
     }
 }

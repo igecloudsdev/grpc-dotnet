@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -108,6 +108,16 @@ public class RetryTests : FunctionalTestBase
 
         // Assert
         Assert.IsTrue(result.Data.Span.SequenceEqual(sentData.ToArray()));
+
+        Logger.LogInformation("Active calls should be empty.");
+        try
+        {
+            await WaitForActiveCallsCountAsync(channel, 0).DefaultTimeout();
+        }
+        catch (Exception ex)
+        {
+            throw new Exception(string.Join(", ", channel.GetActiveCalls().Select(c => c.ToString())), ex);
+        }
     }
 
     [Test]
@@ -390,6 +400,8 @@ public class RetryTests : FunctionalTestBase
         await MakeCallsAsync(channel, method, references, cts.Token).DefaultTimeout();
 
         // Assert
+        await WaitForActiveCallsCountAsync(channel, 0).DefaultTimeout();
+
         // There is a race when cleaning up cancellation token registry.
         // Retry a few times to ensure GC is run after unregister.
         await TestHelpers.AssertIsTrueRetryAsync(() =>
@@ -408,6 +420,16 @@ public class RetryTests : FunctionalTestBase
             // Resources for past calls were successfully GCed.
             return true;
         }, "Assert that retry call resources are released.");
+    }
+
+    private static async Task WaitForActiveCallsCountAsync(GrpcChannel channel, int count)
+    {
+        // Active calls is modified after response TCS is completed.
+        // Retry a few times to ensure active calls count is updated.
+        await TestHelpers.AssertIsTrueRetryAsync(() =>
+        {
+            return channel.GetActiveCalls().Length == count;
+        }, $"Assert there are {count} active calls.");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -671,7 +693,6 @@ public class RetryTests : FunctionalTestBase
         Assert.AreEqual(0, channel.CurrentRetryBufferSize);
     }
 
-#if NET5_0_OR_GREATER
     [Test]
     public async Task ClientStreaming_WriteAsyncCancellationBefore_ClientAbort()
     {
@@ -843,5 +864,4 @@ public class RetryTests : FunctionalTestBase
         // Assert
         Assert.AreEqual(StatusCode.Cancelled, ex.StatusCode);
     }
-#endif
 }

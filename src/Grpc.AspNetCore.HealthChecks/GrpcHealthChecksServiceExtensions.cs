@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -18,8 +18,10 @@
 
 using Grpc.AspNetCore.HealthChecks;
 using Grpc.HealthCheck;
+using Grpc.Shared;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Options;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -35,10 +37,7 @@ public static class GrpcHealthChecksServiceExtensions
     /// <returns>An instance of <see cref="IHealthChecksBuilder"/> from which health checks can be registered.</returns>
     public static IHealthChecksBuilder AddGrpcHealthChecks(this IServiceCollection services)
     {
-        if (services == null)
-        {
-            throw new ArgumentNullException(nameof(services));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(services);
 
         return AddGrpcHealthChecksCore(services);
     }
@@ -51,15 +50,8 @@ public static class GrpcHealthChecksServiceExtensions
     /// <returns>An instance of <see cref="IHealthChecksBuilder"/> from which health checks can be registered.</returns>
     public static IHealthChecksBuilder AddGrpcHealthChecks(this IServiceCollection services, Action<GrpcHealthChecksOptions> configure)
     {
-        if (services == null)
-        {
-            throw new ArgumentNullException(nameof(services));
-        }
-
-        if (configure == null)
-        {
-            throw new ArgumentNullException(nameof(configure));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(services);
+        ArgumentNullThrowHelper.ThrowIfNull(configure);
 
         var builder = AddGrpcHealthChecksCore(services);
 
@@ -79,7 +71,7 @@ public static class GrpcHealthChecksServiceExtensions
         services.Configure<GrpcHealthChecksOptions>(options =>
         {
             // Add default registration that uses all results for default service: ""
-            options.Services.MapService(string.Empty, r => true);
+            options.Services.Map(string.Empty, r => true);
         });
 
         return services.AddHealthChecks();

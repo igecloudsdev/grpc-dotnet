@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -27,6 +27,8 @@ using Microsoft.Extensions.Logging;
 
 namespace Grpc.AspNetCore.Server.Internal;
 
+[DebuggerDisplay("{DebuggerToString(),nq}")]
+[DebuggerTypeProxy(typeof(HttpContextServerCallContextDebugView))]
 internal sealed partial class HttpContextServerCallContext : ServerCallContext, IServerCallContextFeature
 {
     private static readonly AuthContext UnauthenticatedContext = new AuthContext(null, new Dictionary<string, List<AuthProperty>>());
@@ -70,19 +72,14 @@ internal sealed partial class HttpContextServerCallContext : ServerCallContext, 
 
     protected override string MethodCore => HttpContext.Request.Path.Value!;
 
-    protected override string HostCore => HttpContext.Request.Host.Value;
+    protected override string HostCore => HttpContext.Request.Host.Value!;
 
     protected override string PeerCore
     {
         get
         {
             // Follows the standard at https://github.com/grpc/grpc/blob/master/doc/naming.md
-            if (_peer == null)
-            {
-                _peer = BuildPeer();
-            }
-
-            return _peer;
+            return _peer ??= BuildPeer();
         }
     }
 
@@ -196,7 +193,16 @@ internal sealed partial class HttpContextServerCallContext : ServerCallContext, 
         }
         else
         {
-            GrpcServerLog.ErrorExecutingServiceMethod(Logger, method, ex);
+            if (ex is OperationCanceledException or IOException && CancellationTokenCore.IsCancellationRequested)
+            {
+                // Request cancellation can cause OCE and IOException.
+                // When the request has been canceled log these error types at the info-level to avoid creating error-level noise.
+                GrpcServerLog.ServiceMethodCanceled(Logger, method, ex);
+            }
+            else
+            {
+                GrpcServerLog.ErrorExecutingServiceMethod(Logger, method, ex);
+            }
 
             var message = ErrorMessageHelper.BuildErrorMessage("Exception was thrown by handler.", ex, Options.EnableDetailedErrors);
 
@@ -291,15 +297,18 @@ internal sealed partial class HttpContextServerCallContext : ServerCallContext, 
 
     private void LogCallEnd()
     {
-        if (_activity != null)
-        {
-            _activity.AddTag(GrpcServerConstants.ActivityStatusCodeTag, _status.StatusCode.ToTrailerString());
-        }
+        _activity?.AddTag(GrpcServerConstants.ActivityStatusCodeTag, _status.StatusCode.ToTrailerString());
         if (_status.StatusCode != StatusCode.OK)
         {
-            GrpcEventSource.Log.CallFailed(_status.StatusCode);
+            if (GrpcEventSource.Log.IsEnabled())
+            {
+                GrpcEventSource.Log.CallFailed(_status.StatusCode);
+            }
         }
-        GrpcEventSource.Log.CallStop();
+        if (GrpcEventSource.Log.IsEnabled())
+        {
+            GrpcEventSource.Log.CallStop();
+        }
     }
 
     protected override WriteOptions? WriteOptionsCore { get; set; }
@@ -338,10 +347,7 @@ internal sealed partial class HttpContextServerCallContext : ServerCallContext, 
 
     protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders)
     {
-        if (responseHeaders == null)
-        {
-            throw new ArgumentNullException(nameof(responseHeaders));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(responseHeaders);
 
         // Headers can only be written once. Throw on subsequent call to write response header instead of silent no-op.
         if (HttpContext.Response.HasStarted)
@@ -349,21 +355,28 @@ internal sealed partial class HttpContextServerCallContext : ServerCallContext, 
             throw new InvalidOperationException("Response headers can only be sent once per call.");
         }
 
-        foreach (var entry in responseHeaders)
+        foreach (var header in responseHeaders)
         {
-            if (entry.Key == GrpcProtocolConstants.CompressionRequestAlgorithmHeader)
+            if (header.Key == GrpcProtocolConstants.CompressionRequestAlgorithmHeader)
             {
                 // grpc-internal-encoding-request is used in the server to set message compression
                 // on a per-call bassis.
                 // 'grpc-encoding' is sent even if WriteOptions.Flags = NoCompress. In that situation
                 // individual messages will not be written with compression.
-                ResponseGrpcEncoding = entry.Value;
+                ResponseGrpcEncoding = header.Value;
                 HttpContext.Response.Headers[GrpcProtocolConstants.MessageEncodingHeader] = ResponseGrpcEncoding;
             }
             else
             {
-                var encodedValue = entry.IsBinary ? Convert.ToBase64String(entry.ValueBytes) : entry.Value;
-                HttpContext.Response.Headers.Append(entry.Key, encodedValue);
+                var encodedValue = header.IsBinary ? Convert.ToBase64String(header.ValueBytes) : header.Value;
+                try
+                {
+                    HttpContext.Response.Headers.Append(header.Key, encodedValue);
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException($"Error adding response header '{header.Key}'.", ex);
+                }
             }
         }
 
@@ -374,12 +387,12 @@ internal sealed partial class HttpContextServerCallContext : ServerCallContext, 
     public void Initialize(ISystemClock? clock = null)
     {
         _activity = GetHostActivity();
-        if (_activity != null)
-        {
-            _activity.AddTag(GrpcServerConstants.ActivityMethodTag, MethodCore);
-        }
+        _activity?.AddTag(GrpcServerConstants.ActivityMethodTag, MethodCore);
 
-        GrpcEventSource.Log.CallStart(MethodCore);
+        if (GrpcEventSource.Log.IsEnabled())
+        {
+            GrpcEventSource.Log.CallStart(MethodCore);
+        }
 
         var timeout = GetTimeout();
 
@@ -407,14 +420,12 @@ internal sealed partial class HttpContextServerCallContext : ServerCallContext, 
 
     private Activity? GetHostActivity()
     {
-#if NET6_0_OR_GREATER
         // Feature always returns the host activity
         var feature = HttpContext.Features.Get<IHttpActivityFeature>();
         if (feature != null)
         {
             return feature.Activity;
         }
-#endif
 
         // If feature isn't available, or not supported, then fallback to Activity.Current.
         var activity = Activity.Current;
@@ -459,7 +470,10 @@ internal sealed partial class HttpContextServerCallContext : ServerCallContext, 
     internal async Task DeadlineExceededAsync()
     {
         GrpcServerLog.DeadlineExceeded(Logger, GetTimeout());
-        GrpcEventSource.Log.CallDeadlineExceeded();
+        if (GrpcEventSource.Log.IsEnabled())
+        {
+            GrpcEventSource.Log.CallDeadlineExceeded();
+        }
 
         var status = new Status(StatusCode.DeadlineExceeded, "Deadline Exceeded");
 
@@ -563,5 +577,31 @@ internal sealed partial class HttpContextServerCallContext : ServerCallContext, 
         {
             GrpcServerLog.EncodingNotInAcceptEncoding(Logger, resolvedResponseGrpcEncoding);
         }
+    }
+
+    private string DebuggerToString() => $"Method = {Method}";
+
+    private sealed class HttpContextServerCallContextDebugView
+    {
+        private readonly HttpContextServerCallContext _context;
+
+        public HttpContextServerCallContextDebugView(HttpContextServerCallContext context)
+        {
+            _context = context;
+        }
+
+        public AuthContext AuthContext => _context.AuthContext;
+        public CancellationToken CancellationToken => _context.CancellationToken;
+        public DateTime Deadline => _context.Deadline;
+        public string Host => _context.Host;
+        public string Method => _context.Method;
+        public string Peer => _context.Peer;
+        public Metadata RequestHeaders => _context.RequestHeaders;
+        public Metadata ResponseTrailers => _context.ResponseTrailers;
+        public Status Status => _context.Status;
+        public IDictionary<object, object> UserState => _context.UserState;
+        public WriteOptions? WriteOptions => _context.WriteOptions;
+
+        public HttpContext HttpContext => _context.HttpContext;
     }
 }

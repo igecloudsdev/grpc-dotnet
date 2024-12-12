@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -16,20 +16,17 @@
 
 #endregion
 
+using System.Collections;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using Grpc.Core;
 using Grpc.Net.Client.Internal.Http;
 using Grpc.Shared;
 using Microsoft.Extensions.Logging;
-using System.Runtime.ExceptionServices;
 #if SUPPORT_LOAD_BALANCING
 using Grpc.Net.Client.Balancer.Internal;
-#endif
-
-#if NETSTANDARD2_0
-using ValueTask = System.Threading.Tasks.Task;
 #endif
 
 namespace Grpc.Net.Client.Internal;
@@ -57,19 +54,23 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
 
     // These are set depending on the type of gRPC call
     private TaskCompletionSource<TResponse>? _responseTcs;
+    private TRequest? _request;
 
     public int MessagesWritten { get; private set; }
+    public int MessagesRead { get; private set; }
     public HttpContentClientStreamWriter<TRequest, TResponse>? ClientStreamWriter { get; private set; }
     public HttpContentClientStreamReader<TRequest, TResponse>? ClientStreamReader { get; private set; }
 
-    public GrpcCall(Method<TRequest, TResponse> method, GrpcMethodInfo grpcMethodInfo, CallOptions options, GrpcChannel channel, int attemptCount)
+    public GrpcCall(Method<TRequest, TResponse> method, GrpcMethodInfo grpcMethodInfo, CallOptions options, GrpcChannel channel, int attemptCount, bool forceAsyncHttpResponse)
         : base(options, channel)
     {
         // Validate deadline before creating any objects that require cleanup
         ValidateDeadline(options.Deadline);
 
         _callCts = new CancellationTokenSource();
-        _httpResponseTcs = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Retries and hedging can run multiple calls at the same time and use locking for thread-safety.
+        // Running HTTP response continuation asynchronously is required for locking to work correctly.
+        _httpResponseTcs = new TaskCompletionSource<HttpResponseMessage>(forceAsyncHttpResponse ? TaskCreationOptions.RunContinuationsAsynchronously : TaskCreationOptions.None);
         // Run the callTcs continuation immediately to keep the same context. Required for Activity.
         _callTcs = new TaskCompletionSource<Status>();
         Method = method;
@@ -90,7 +91,7 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
         }
     }
 
-    public Task<Status> CallTask => _callTcs.Task;
+    public override Task<Status> CallTask => _callTcs.Task;
 
     public override CancellationToken CancellationToken => _callCts.Token;
 
@@ -100,7 +101,13 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
     IClientStreamWriter<TRequest>? IGrpcCall<TRequest, TResponse>.ClientStreamWriter => ClientStreamWriter;
     IAsyncStreamReader<TResponse>? IGrpcCall<TRequest, TResponse>.ClientStreamReader => ClientStreamReader;
 
-    public void StartUnary(TRequest request) => StartUnaryCore(CreatePushUnaryContent(request));
+    public object? CallWrapper { get; set; }
+
+    public void StartUnary(TRequest request)
+    {
+        _request = request;
+        StartUnaryCore(CreatePushUnaryContent(request));
+    }
 
     public void StartClientStreaming()
     {
@@ -121,7 +128,7 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
             ? new PushUnaryContent<TRequest, TResponse>(request, WriteAsync)
             : new WinHttpUnaryContent<TRequest, TResponse>(request, WriteAsync, this);
 
-        ValueTask WriteAsync(TRequest request, Stream stream)
+        Task WriteAsync(TRequest request, Stream stream)
         {
             return WriteMessageAsync(stream, request, Options);
         }
@@ -137,7 +144,10 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
 
     internal void StartUnaryCore(HttpContent content)
     {
-        _responseTcs = new TaskCompletionSource<TResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Not created with RunContinuationsAsynchronously to avoid unnecessary dispatch to the thread pool.
+        // The TCS is set from RunCall but it is the last operation before the method exits so there shouldn't
+        // be an impact from running the response continutation synchronously.
+        _responseTcs = new TaskCompletionSource<TResponse>();
 
         var timeout = GetTimeout();
         var message = CreateHttpRequestMessage(timeout);
@@ -156,7 +166,10 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
 
     internal void StartClientStreamingCore(HttpContentClientStreamWriter<TRequest, TResponse> clientStreamWriter, HttpContent content)
     {
-        _responseTcs = new TaskCompletionSource<TResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Not created with RunContinuationsAsynchronously to avoid unnecessary dispatch to the thread pool.
+        // The TCS is set from RunCall but it is the last operation before the method exits so there shouldn't
+        // be an impact from running the response continutation synchronously.
+        _responseTcs = new TaskCompletionSource<TResponse>();
 
         var timeout = GetTimeout();
         var message = CreateHttpRequestMessage(timeout);
@@ -242,16 +255,7 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
 
     public void EnsureNotDisposed()
     {
-        if (Disposed)
-        {
-            throw new ObjectDisposedException(nameof(GrpcCall<TRequest, TResponse>));
-        }
-    }
-
-    public Exception CreateCanceledStatusException(Exception? ex = null)
-    {
-        var status = (CallTask.IsCompletedSuccessfully()) ? CallTask.Result : new Status(StatusCode.Cancelled, string.Empty, ex);
-        return CreateRpcException(status);
+        ObjectDisposedThrowHelper.ThrowIf(Disposed, typeof(GrpcCall<TRequest, TResponse>));
     }
 
     private void FinishResponseAndCleanUp(Status status)
@@ -286,8 +290,12 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
     {
         if (_responseHeadersTask == null)
         {
-            // Allocate metadata and task only when requested
+            // Allocate metadata and task only when requested.
             _responseHeadersTask = GetResponseHeadersCoreAsync();
+
+            // ResponseHeadersAsync could be called inside a client interceptor when a call is wrapped.
+            // Most people won't use the headers result. Observed exception to avoid unobserved exception event.
+            _responseHeadersTask.ObserveException();
         }
 
         return _responseHeadersTask;
@@ -431,9 +439,6 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
             // Cancellation will also cause reader/writer to throw if used afterwards.
             _callCts.Cancel();
 
-            // Ensure any logic that is waiting on the HttpResponse is unstuck.
-            _httpResponseTcs.TrySetCanceled();
-
             // Cancellation token won't send RST_STREAM if HttpClient.SendAsync is complete.
             // Dispose HttpResponseMessage to send RST_STREAM to server for in-progress calls.
             HttpResponse?.Dispose();
@@ -499,7 +504,7 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
                     }
                     else
                     {
-                        GrpcCallLog.ErrorStartingCall(Logger, ex);
+                        GrpcCallLog.ErrorStartingCall(Logger);
                         throw;
                     }
                 }
@@ -585,8 +590,10 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
                         }
                         else
                         {
-                            GrpcEventSource.Log.MessageReceived();
-
+                            if (GrpcEventSource.Log.IsEnabled())
+                            {
+                                GrpcEventSource.Log.MessageReceived();
+                            }
                             FinishResponseAndCleanUp(status.Value);
                             finished = FinishCall(request, diagnosticSourceEnabled, activity, status.Value);
 
@@ -638,7 +645,7 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
                 if (_responseTcs != null)
                 {
                     _responseTcs.TrySetException(resolvedException);
-                    
+
                     // Always observe cancellation-like exceptions.
                     if (IsCancellationOrDeadlineException(ex))
                     {
@@ -650,6 +657,9 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
             // Verify that FinishCall is called in every code path of this method.
             // Should create an "Unassigned variable" compiler error if not set.
             Debug.Assert(finished);
+            // Should be completed before exiting.
+            Debug.Assert(_httpResponseTcs.Task.IsCompleted);
+            Debug.Assert(_responseTcs == null || _responseTcs.Task.IsCompleted);
         }
     }
 
@@ -754,23 +764,6 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
         return ex;
     }
 
-    public CancellationToken GetCanceledToken(CancellationToken methodCancellationToken)
-    {
-        if (methodCancellationToken.IsCancellationRequested)
-        {
-            return methodCancellationToken;
-        }
-        else if (Options.CancellationToken.IsCancellationRequested)
-        {
-            return Options.CancellationToken;
-        }
-        else if (CancellationToken.IsCancellationRequested)
-        {
-            return CancellationToken;
-        }
-        return CancellationToken.None;
-    }
-
     private void SetFailedResult(Status status)
     {
         CompatibilityHelpers.Assert(_responseTcs != null);
@@ -789,27 +782,13 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
         }
     }
 
-    public Exception CreateFailureStatusException(Status status)
-    {
-        if (Channel.ThrowOperationCanceledOnCancellation &&
-            (status.StatusCode == StatusCode.DeadlineExceeded || status.StatusCode == StatusCode.Cancelled))
-        {
-            // Convert status response of DeadlineExceeded to OperationCanceledException when
-            // ThrowOperationCanceledOnCancellation is true.
-            // This avoids a race between the client-side timer and the server status throwing different
-            // errors on deadline exceeded.
-            return new OperationCanceledException();
-        }
-        else
-        {
-            return CreateRpcException(status);
-        }
-    }
-
     private (bool diagnosticSourceEnabled, Activity? activity) InitializeCall(HttpRequestMessage request, TimeSpan? timeout)
     {
         GrpcCallLog.StartingCall(Logger, Method.Type, request.RequestUri!);
-        GrpcEventSource.Log.CallStart(Method.FullName);
+        if (GrpcEventSource.Log.IsEnabled())
+        {
+            GrpcEventSource.Log.CallStart(Method.FullName);
+        }
 
         // Deadline will cancel the call CTS.
         // Only exceed deadline/start timer after reader/writer have been created, otherwise deadline will cancel
@@ -829,7 +808,7 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
                 GrpcCallLog.StartingDeadlineTimeout(Logger, timeout.Value);
 
                 var dueTime = CommonGrpcProtocolHelpers.GetTimerDueTime(timeout.Value, Channel.MaxTimerDueTime);
-                _deadlineTimer = new Timer(DeadlineExceededCallback, null, dueTime, Timeout.Infinite);
+                _deadlineTimer = NonCapturingTimer.Create(DeadlineExceededCallback, state: null, TimeSpan.FromMilliseconds(dueTime), Timeout.InfiniteTimeSpan);
             }
         }
 
@@ -841,9 +820,15 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
         // 1. Diagnostic source is enabled
         // 2. Logging is enabled
         // 3. There is an existing activity (to enable activity propagation)
-        if (diagnosticSourceEnabled || Logger.IsEnabled(LogLevel.Critical) || Activity.Current != null)
+        // 4. ActivitySource has listeners
+        if (diagnosticSourceEnabled || Logger.IsEnabled(LogLevel.Critical) || Activity.Current != null || GrpcDiagnostics.ActivitySource.HasListeners())
         {
-            activity = new Activity(GrpcDiagnostics.ActivityName);
+            activity = GrpcDiagnostics.ActivitySource.CreateActivity(GrpcDiagnostics.ActivityName, ActivityKind.Client);
+
+            // ActivitySource only returns an activity if someone is listening.
+            // If we're at this point then we always want there to be an activity. Create the activity manually.
+            activity ??= new Activity(GrpcDiagnostics.ActivityName);
+
             activity.AddTag(GrpcDiagnostics.GrpcMethodTagName, Method.FullName);
             activity.Start();
 
@@ -882,19 +867,26 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
                     if (IsDeadlineExceededUnsynchronized())
                     {
                         GrpcCallLog.DeadlineExceeded(Logger);
-                        GrpcEventSource.Log.CallDeadlineExceeded();
-
+                        if (GrpcEventSource.Log.IsEnabled())
+                        {
+                            GrpcEventSource.Log.CallDeadlineExceeded();
+                        }
                         _deadline = DateTime.MaxValue;
                     }
                 }
             }
 
-            GrpcCallLog.GrpcStatusError(Logger, status.StatusCode, status.Detail);
-            GrpcEventSource.Log.CallFailed(status.StatusCode);
+            GrpcCallLog.GrpcStatusError(Logger, status.StatusCode, status.Detail, status.DebugException);
+            if (GrpcEventSource.Log.IsEnabled())
+            {
+                GrpcEventSource.Log.CallFailed(status.StatusCode);
+            }
         }
         GrpcCallLog.FinishedCall(Logger);
-        GrpcEventSource.Log.CallStop();
-
+        if (GrpcEventSource.Log.IsEnabled())
+        {
+            GrpcEventSource.Log.CallStop();
+        }
         // Activity needs to be stopped in the same execution context it was started
         if (activity != null)
         {
@@ -939,13 +931,13 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
 
             if (Options.Credentials != null)
             {
-                await GrpcProtocolHelpers.ReadCredentialMetadata(configurator, Channel, request, Method, Options.Credentials).ConfigureAwait(false);
+                await GrpcProtocolHelpers.ReadCredentialMetadata(configurator, Channel, request, Method, Options.Credentials, _callCts.Token).ConfigureAwait(false);
             }
             if (Channel.CallCredentials?.Count > 0)
             {
                 foreach (var credentials in Channel.CallCredentials)
                 {
-                    await GrpcProtocolHelpers.ReadCredentialMetadata(configurator, Channel, request, Method, credentials).ConfigureAwait(false);
+                    await GrpcProtocolHelpers.ReadCredentialMetadata(configurator, Channel, request, Method, credentials, _callCts.Token).ConfigureAwait(false);
                 }
             }
         }
@@ -965,9 +957,9 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
     private HttpRequestMessage CreateHttpRequestMessage(TimeSpan? timeout)
     {
         var message = new HttpRequestMessage(HttpMethod.Post, _grpcMethodInfo.CallUri);
-        message.Version = GrpcProtocolConstants.Http2Version;
+        message.Version = Channel.HttpVersion;
 #if NET5_0_OR_GREATER
-        message.VersionPolicy = HttpVersionPolicy.RequestVersionOrHigher;
+        message.VersionPolicy = Channel.HttpVersionPolicy;
 #endif
 
         // Set raw headers on request using name/values. Typed headers allocate additional objects.
@@ -1096,8 +1088,10 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
         Debug.Assert(Monitor.IsEntered(this));
 
         GrpcCallLog.DeadlineExceeded(Logger);
-        GrpcEventSource.Log.CallDeadlineExceeded();
-
+        if (GrpcEventSource.Log.IsEnabled())
+        {
+            GrpcEventSource.Log.CallDeadlineExceeded();
+        }
         // Set _deadline to DateTime.MaxValue to signal that deadline has been exceeded.
         // This prevents duplicate logging and cancellation.
         _deadline = DateTime.MaxValue;
@@ -1105,7 +1099,7 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
         CancelCall(new Status(StatusCode.DeadlineExceeded, string.Empty));
     }
 
-    internal ValueTask WriteMessageAsync(
+    internal Task WriteMessageAsync(
         Stream stream,
         ReadOnlyMemory<byte> message,
         CancellationToken cancellationToken)
@@ -1117,7 +1111,7 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
             cancellationToken);
     }
 
-    internal ValueTask WriteMessageAsync(
+    internal Task WriteMessageAsync(
         Stream stream,
         TRequest message,
         CallOptions callOptions)
@@ -1130,25 +1124,31 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
             callOptions);
     }
 
-#if !NETSTANDARD2_0
-    internal ValueTask<TResponse?> ReadMessageAsync(
+#if !NETSTANDARD2_0 && !NET462
+    internal async ValueTask<TResponse?> ReadMessageAsync(
 #else
-    internal Task<TResponse?> ReadMessageAsync(
+    internal async Task<TResponse?> ReadMessageAsync(
 #endif
         Stream responseStream,
         string grpcEncoding,
         bool singleMessage,
         CancellationToken cancellationToken)
     {
-        return responseStream.ReadMessageAsync(
+        var message = await responseStream.ReadMessageAsync(
             this,
             Method.ResponseMarshaller.ContextualDeserializer,
             grpcEncoding,
             singleMessage,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
+        if (message == null)
+        {
+            return null;
+        }
+        MessagesRead++;
+        return message;
     }
 
-    public Task WriteClientStreamAsync<TState>(Func<GrpcCall<TRequest, TResponse>, Stream, CallOptions, TState, ValueTask> writeFunc, TState state, CancellationToken cancellationToken)
+    public Task WriteClientStreamAsync<TState>(Func<GrpcCall<TRequest, TResponse>, Stream, CallOptions, TState, Task> writeFunc, TState state, CancellationToken cancellationToken)
     {
         return ClientStreamWriter!.WriteAsync(writeFunc, state, cancellationToken);
     }
@@ -1170,4 +1170,7 @@ internal sealed partial class GrpcCall<TRequest, TResponse> : GrpcCall, IGrpcCal
     {
         diagnosticSource.Write(name, value);
     }
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+    public IEnumerator<KeyValuePair<string, object>> GetEnumerator() => GrpcProtocolConstants.GetDebugEnumerator(Channel, Method, _request);
 }

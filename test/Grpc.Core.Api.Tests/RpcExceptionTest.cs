@@ -17,11 +17,6 @@
 #endregion
 
 using System;
-using System.Collections.Generic;
-using System.Threading;
-using Grpc.Core;
-using Grpc.Core.Internal;
-using Grpc.Core.Utils;
 using NUnit.Framework;
 
 namespace Grpc.Core.Tests;
@@ -41,7 +36,7 @@ public class RpcExceptionTest
     [Test]
     public void DefaultMessageDoesntContainDebugExceptionStacktrace()
     {
-        Exception someExceptionWithStacktrace = null;
+        Exception someExceptionWithStacktrace;
         try
         {
             throw new ArgumentException("test exception");
@@ -53,7 +48,7 @@ public class RpcExceptionTest
         var ex = new RpcException(new Status(StatusCode.Internal, "abc", someExceptionWithStacktrace));
         // Check debug exceptions's message is contained.
         StringAssert.Contains(someExceptionWithStacktrace.Message, ex.Message);
-        StringAssert.Contains(someExceptionWithStacktrace.GetType().FullName, ex.Message);
+        StringAssert.Contains(someExceptionWithStacktrace.GetType().FullName!, ex.Message);
         // If name of the current method is not in the message, it probably doesn't contain the stack trace.
         StringAssert.DoesNotContain(nameof(DefaultMessageDoesntContainDebugExceptionStacktrace), ex.Message);
     }

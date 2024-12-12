@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -19,7 +19,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
-using System.Diagnostics.CodeAnalysis;
 using System.IO.Pipelines;
 using System.Runtime.CompilerServices;
 using Grpc.Core;
@@ -65,10 +64,14 @@ internal static partial class PipeExtensions
             serializer(response, serializationContext);
 
             GrpcServerLog.MessageSent(serverCallContext.Logger);
-            GrpcEventSource.Log.MessageSent();
+            if (GrpcEventSource.Log.IsEnabled())
+            {
+                GrpcEventSource.Log.MessageSent();
+            }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Don't write error when user cancels write
             GrpcServerLog.ErrorSendingMessage(logger, ex);
             throw;
         }
@@ -84,7 +87,7 @@ internal static partial class PipeExtensions
             var httpResponse = serverCallContext.HttpContext.Response;
             if (!httpResponse.HasStarted)
             {
-                await httpResponse.StartAsync();
+                await httpResponse.StartAsync(cancellationToken);
             }
 
             GrpcServerLog.SendingMessage(logger);
@@ -99,7 +102,7 @@ internal static partial class PipeExtensions
 
             if (flush)
             {
-                var flushResult = await pipeWriter.FlushAsync();
+                var flushResult = await pipeWriter.FlushAsync(cancellationToken);
 
                 // Workaround bug where FlushAsync doesn't return IsCanceled = true on request abort.
                 // https://github.com/dotnet/aspnetcore/issues/40788
@@ -112,10 +115,14 @@ internal static partial class PipeExtensions
             }
 
             GrpcServerLog.MessageSent(serverCallContext.Logger);
-            GrpcEventSource.Log.MessageSent();
+            if (GrpcEventSource.Log.IsEnabled())
+            {
+                GrpcEventSource.Log.MessageSent();
+            }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Don't write error when user cancels write
             GrpcServerLog.ErrorSendingMessage(logger, ex);
             throw;
         }
@@ -226,8 +233,10 @@ internal static partial class PipeExtensions
                             serverCallContext.DeserializationContext.SetPayload(null);
 
                             GrpcServerLog.ReceivedMessage(logger);
-
-                            GrpcEventSource.Log.MessageReceived();
+                            if (GrpcEventSource.Log.IsEnabled())
+                            {
+                                GrpcEventSource.Log.MessageReceived();
+                            }
 
                             // Store the request
                             // Need to verify the request completes with no additional data
@@ -266,8 +275,9 @@ internal static partial class PipeExtensions
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Don't write error when user cancels read
             GrpcServerLog.ErrorReadingMessage(logger, ex);
             throw;
         }
@@ -281,9 +291,7 @@ internal static partial class PipeExtensions
     /// <param name="deserializer">Message deserializer.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>Complete message data or null if the stream is complete.</returns>
-#if NET6_0_OR_GREATER
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
-#endif
     public static async ValueTask<T?> ReadStreamMessageAsync<T>(this PipeReader input, HttpContextServerCallContext serverCallContext, Func<DeserializationContext, T> deserializer, CancellationToken cancellationToken = default)
         where T : class
     {
@@ -318,8 +326,10 @@ internal static partial class PipeExtensions
                             serverCallContext.DeserializationContext.SetPayload(null);
 
                             GrpcServerLog.ReceivedMessage(logger);
-
-                            GrpcEventSource.Log.MessageReceived();
+                            if (GrpcEventSource.Log.IsEnabled())
+                            {
+                                GrpcEventSource.Log.MessageReceived();
+                            }
 
                             return request;
                         }

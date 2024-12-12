@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -16,11 +16,8 @@
 
 #endregion
 
-#if !NETSTANDARD2_0
-
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
-using System.Threading;
+using Grpc.Shared;
 
 namespace Grpc.Core;
 
@@ -38,10 +35,7 @@ public static class AsyncStreamReaderExtensions
     /// <returns>The created async enumerable.</returns>
     public static IAsyncEnumerable<T> ReadAllAsync<T>(this IAsyncStreamReader<T> streamReader, CancellationToken cancellationToken = default)
     {
-        if (streamReader == null)
-        {
-            throw new System.ArgumentNullException(nameof(streamReader));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(streamReader);
 
         return ReadAllAsyncCore(streamReader, cancellationToken);
     }
@@ -54,5 +48,3 @@ public static class AsyncStreamReaderExtensions
         }
     }
 }
-
-#endif

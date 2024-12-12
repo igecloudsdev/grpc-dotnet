@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -21,17 +21,16 @@ using Grpc.Core;
 using Grpc.Shared.Server;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+#if NET8_0_OR_GREATER
+using Microsoft.AspNetCore.Http.Timeouts;
+#endif
 using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
 using Microsoft.Extensions.Logging;
 using Microsoft.Net.Http.Headers;
 
 namespace Grpc.AspNetCore.Server.Internal.CallHandlers;
 
-internal abstract class ServerCallHandlerBase<
-#if NET5_0_OR_GREATER
-    [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
-#endif
-    TService, TRequest, TResponse>
+internal abstract class ServerCallHandlerBase<[DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)] TService, TRequest, TResponse>
     where TService : class
     where TRequest : class
     where TResponse : class
@@ -57,10 +56,7 @@ internal abstract class ServerCallHandlerBase<
         }
 
         if (!GrpcProtocolConstants.IsHttp2(httpContext.Request.Protocol)
-#if NET6_0_OR_GREATER
-            && !GrpcProtocolConstants.IsHttp3(httpContext.Request.Protocol)
-#endif
-            )
+            && !GrpcProtocolConstants.IsHttp3(httpContext.Request.Protocol))
         {
             return ProcessNonHttp2Request(httpContext);
         }
@@ -133,6 +129,29 @@ internal abstract class ServerCallHandlerBase<
             }
         }
     }
+
+#if NET8_0_OR_GREATER
+    protected void DisableRequestTimeout(HttpContext httpContext)
+    {
+        // Disable global request timeout on streaming methods.
+        var requestTimeoutFeature = httpContext.Features.Get<IHttpRequestTimeoutFeature>();
+        if (requestTimeoutFeature is not null)
+        {
+            // Don't disable if the endpoint has explicit timeout metadata.
+            var endpoint = httpContext.GetEndpoint();
+            if (endpoint is not null)
+            {
+                if (endpoint.Metadata.GetMetadata<RequestTimeoutAttribute>() is not null ||
+                    endpoint.Metadata.GetMetadata<RequestTimeoutPolicy>() is not null)
+                {
+                    return;
+                }
+            }
+
+            requestTimeoutFeature.DisableTimeout();
+        }
+    }
+#endif
 
     private Task ProcessNonHttp2Request(HttpContext httpContext)
     {

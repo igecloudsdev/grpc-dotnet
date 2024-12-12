@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -24,11 +24,7 @@ using Microsoft.AspNetCore.Routing;
 
 namespace Grpc.AspNetCore.Server.Model.Internal;
 
-internal class ProviderServiceBinder<
-#if NET5_0_OR_GREATER
-    [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
-#endif
-    TService> : ServiceBinderBase where TService : class
+internal sealed class ProviderServiceBinder<[DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)] TService> : ServiceBinderBase where TService : class
 {
     private readonly ServiceMethodProviderContext<TService> _context;
     private readonly Type _declaringType;
@@ -39,7 +35,7 @@ internal class ProviderServiceBinder<
         _declaringType = declaringType;
     }
 
-    public override void AddMethod<TRequest, TResponse>(Method<TRequest, TResponse> method, ClientStreamingServerMethod<TRequest, TResponse> handler)
+    public override void AddMethod<TRequest, TResponse>(Method<TRequest, TResponse> method, ClientStreamingServerMethod<TRequest, TResponse>? handler)
     {
         var (invoker, metadata) = CreateModelCore<ClientStreamingServerMethod<TService, TRequest, TResponse>>(
             method.Name,
@@ -48,7 +44,7 @@ internal class ProviderServiceBinder<
         _context.AddClientStreamingMethod<TRequest, TResponse>(method, metadata, invoker);
     }
 
-    public override void AddMethod<TRequest, TResponse>(Method<TRequest, TResponse> method, DuplexStreamingServerMethod<TRequest, TResponse> handler)
+    public override void AddMethod<TRequest, TResponse>(Method<TRequest, TResponse> method, DuplexStreamingServerMethod<TRequest, TResponse>? handler)
     {
         var (invoker, metadata) = CreateModelCore<DuplexStreamingServerMethod<TService, TRequest, TResponse>>(
             method.Name,
@@ -57,7 +53,7 @@ internal class ProviderServiceBinder<
         _context.AddDuplexStreamingMethod<TRequest, TResponse>(method, metadata, invoker);
     }
 
-    public override void AddMethod<TRequest, TResponse>(Method<TRequest, TResponse> method, ServerStreamingServerMethod<TRequest, TResponse> handler)
+    public override void AddMethod<TRequest, TResponse>(Method<TRequest, TResponse> method, ServerStreamingServerMethod<TRequest, TResponse>? handler)
     {
         var (invoker, metadata) = CreateModelCore<ServerStreamingServerMethod<TService, TRequest, TResponse>>(
             method.Name,
@@ -66,7 +62,7 @@ internal class ProviderServiceBinder<
         _context.AddServerStreamingMethod<TRequest, TResponse>(method, metadata, invoker);
     }
 
-    public override void AddMethod<TRequest, TResponse>(Method<TRequest, TResponse> method, UnaryServerMethod<TRequest, TResponse> handler)
+    public override void AddMethod<TRequest, TResponse>(Method<TRequest, TResponse> method, UnaryServerMethod<TRequest, TResponse>? handler)
     {
         var (invoker, metadata) = CreateModelCore<UnaryServerMethod<TService, TRequest, TResponse>>(
             method.Name,

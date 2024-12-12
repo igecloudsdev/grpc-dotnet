@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -16,6 +16,7 @@
 
 #endregion
 
+using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using Grpc.Core;
 using Grpc.Shared;
@@ -24,7 +25,9 @@ using Log = Grpc.Net.Client.Internal.HttpContentClientStreamReaderLog;
 
 namespace Grpc.Net.Client.Internal;
 
-internal class HttpContentClientStreamReader<TRequest, TResponse> : IAsyncStreamReader<TResponse>
+[DebuggerDisplay("{DebuggerToString(),nq}")]
+[DebuggerTypeProxy(typeof(HttpContentClientStreamReader<,>.HttpContentClientStreamReaderDebugView))]
+internal sealed class HttpContentClientStreamReader<TRequest, TResponse> : IAsyncStreamReader<TResponse>
     where TRequest : class
     where TResponse : class
 {
@@ -153,6 +156,10 @@ internal class HttpContentClientStreamReader<TRequest, TResponse> : IAsyncStream
 
             CompatibilityHelpers.Assert(_grpcEncoding != null, "Encoding should have been calculated from response.");
 
+            // Clear current before moving next. This prevents rooting the previous value while getting the next one.
+            // In a long running stream this can allow the previous value to be GCed.
+            Current = null!;
+
             var readMessage = await _call.ReadMessageAsync(
                 _responseStream,
                 _grpcEncoding,
@@ -173,8 +180,10 @@ internal class HttpContentClientStreamReader<TRequest, TResponse> : IAsyncStream
                 Current = null!;
                 return false;
             }
-
-            GrpcEventSource.Log.MessageReceived();
+            if (GrpcEventSource.Log.IsEnabled())
+            {
+                GrpcEventSource.Log.MessageReceived();
+            }
             Current = readMessage!;
             return true;
         }
@@ -247,15 +256,27 @@ internal class HttpContentClientStreamReader<TRequest, TResponse> : IAsyncStream
             return moveNextTask != null && !moveNextTask.IsCompleted;
         }
     }
+
+    private string DebuggerToString() => $"ReadCount = {_call.MessagesRead}, EndOfStream = {(_call.ResponseFinished ? "true" : "false")}";
+
+    private sealed class HttpContentClientStreamReaderDebugView
+    {
+        private readonly HttpContentClientStreamReader<TRequest, TResponse> _reader;
+
+        public HttpContentClientStreamReaderDebugView(HttpContentClientStreamReader<TRequest, TResponse> reader)
+        {
+            _reader = reader;
+        }
+
+        public object? Call => _reader._call.CallWrapper;
+        public long ReadCount => _reader._call.MessagesRead;
+        public TResponse Current => _reader.Current;
+        public bool EndOfStream => _reader._call.ResponseFinished;
+    }
 }
 
-internal static class HttpContentClientStreamReaderLog
+internal static partial class HttpContentClientStreamReaderLog
 {
-    private static readonly Action<ILogger, Exception> _readMessageError =
-        LoggerMessage.Define(LogLevel.Error, new EventId(1, "ReadMessageError"), "Error reading message.");
-
-    public static void ReadMessageError(ILogger logger, Exception ex)
-    {
-        _readMessageError(logger, ex);
-    }
+    [LoggerMessage(Level = LogLevel.Error, EventId = 1, EventName = "ReadMessageError", Message = "Error reading message.")]
+    public static partial void ReadMessageError(ILogger logger, Exception ex);
 }

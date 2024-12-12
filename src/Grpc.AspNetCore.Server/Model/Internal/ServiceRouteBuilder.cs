@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -19,21 +19,15 @@
 using System.Diagnostics.CodeAnalysis;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.Core;
-using Grpc.Shared;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
-using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.Logging;
 using Log = Grpc.AspNetCore.Server.Model.Internal.ServiceRouteBuilderLog;
 
 namespace Grpc.AspNetCore.Server.Model.Internal;
 
-internal class ServiceRouteBuilder<
-#if NET5_0_OR_GREATER
-    [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
-#endif
-    TService> where TService : class
+internal sealed class ServiceRouteBuilder<[DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)] TService> where TService : class
 {
     private readonly IEnumerable<IServiceMethodProvider<TService>> _serviceMethodProviders;
     private readonly ServerCallHandlerFactory<TService> _serverCallHandlerFactory;
@@ -123,7 +117,7 @@ internal class ServiceRouteBuilder<
         if (!serverCallHandlerFactory.IgnoreUnknownServices && serviceMethodsRegistry.Methods.Count == 0)
         {
             // Only one unimplemented service endpoint is needed for the application
-            endpointConventionBuilders.Add(CreateUnimplementedEndpoint(endpointRouteBuilder, "{unimplementedService}/{unimplementedMethod}", "Unimplemented service", serverCallHandlerFactory.CreateUnimplementedService()));
+            endpointConventionBuilders.Add(CreateUnimplementedEndpoint(endpointRouteBuilder, $"{{unimplementedService}}/{{unimplementedMethod:{GrpcServerConstants.GrpcUnimplementedConstraintPrefix}}}", "Unimplemented service", serverCallHandlerFactory.CreateUnimplementedService()));
         }
 
         // Return UNIMPLEMENTED status for missing method:
@@ -142,19 +136,14 @@ internal class ServiceRouteBuilder<
                     continue;
                 }
 
-                endpointConventionBuilders.Add(CreateUnimplementedEndpoint(endpointRouteBuilder, serviceName + "/{unimplementedMethod}", $"Unimplemented method for {serviceName}", serverCallHandlerFactory.CreateUnimplementedMethod()));
+                endpointConventionBuilders.Add(CreateUnimplementedEndpoint(endpointRouteBuilder, $"{serviceName}/{{unimplementedMethod:{GrpcServerConstants.GrpcUnimplementedConstraintPrefix}}}", $"Unimplemented method for {serviceName}", serverCallHandlerFactory.CreateUnimplementedMethod()));
             }
         }
     }
 
     private static IEndpointConventionBuilder CreateUnimplementedEndpoint(IEndpointRouteBuilder endpointRouteBuilder, string pattern, string displayName, RequestDelegate requestDelegate)
     {
-        var routePattern = RoutePatternFactory.Parse(
-            pattern,
-            defaults: null,
-            parameterPolicies: new RouteValueDictionary { ["contentType"] = GrpcUnimplementedConstraint.Instance });
-
-        var endpointBuilder = endpointRouteBuilder.Map(routePattern, requestDelegate);
+        var endpointBuilder = endpointRouteBuilder.Map(pattern, requestDelegate);
 
         endpointBuilder.Add(ep =>
         {
@@ -165,50 +154,12 @@ internal class ServiceRouteBuilder<
 
         return endpointBuilder;
     }
-
-    private class GrpcUnimplementedConstraint : IRouteConstraint
-    {
-        public static readonly GrpcUnimplementedConstraint Instance = new GrpcUnimplementedConstraint();
-
-        public bool Match(HttpContext? httpContext, IRouter? route, string routeKey, RouteValueDictionary values, RouteDirection routeDirection)
-        {
-            if (httpContext == null)
-            {
-                return false;
-            }
-
-            // Constraint needs to be valid when a CORS preflight request is received so that CORS middleware will run
-            if (GrpcProtocolHelpers.IsCorsPreflightRequest(httpContext))
-            {
-                return true;
-            }
-
-            if (!HttpMethods.IsPost(httpContext.Request.Method))
-            {
-                return false;
-            }
-
-            return CommonGrpcProtocolHelpers.IsContentType(GrpcProtocolConstants.GrpcContentType, httpContext.Request.ContentType) ||
-                CommonGrpcProtocolHelpers.IsContentType(GrpcProtocolConstants.GrpcWebContentType, httpContext.Request.ContentType) ||
-                CommonGrpcProtocolHelpers.IsContentType(GrpcProtocolConstants.GrpcWebTextContentType, httpContext.Request.ContentType);
-        }
-
-        private GrpcUnimplementedConstraint()
-        {
-        }
-    }
 }
 
-internal static class ServiceRouteBuilderLog
+internal static partial class ServiceRouteBuilderLog
 {
-    private static readonly Action<ILogger, string, string, MethodType, string, string, Exception?> _addedServiceMethod =
-        LoggerMessage.Define<string, string, MethodType, string, string>(LogLevel.Trace, new EventId(1, "AddedServiceMethod"), "Added gRPC method '{MethodName}' to service '{ServiceName}'. Method type: {MethodType}, HTTP method: {HttpMethod}, route pattern: '{RoutePattern}'.");
-
-    private static readonly Action<ILogger, Type, Exception?> _discoveringServiceMethods =
-        LoggerMessage.Define<Type>(LogLevel.Trace, new EventId(2, "DiscoveringServiceMethods"), "Discovering gRPC methods for {ServiceType}.");
-
-    private static readonly Action<ILogger, Type, Exception?> _noServiceMethodsDiscovered =
-        LoggerMessage.Define<Type>(LogLevel.Debug, new EventId(3, "NoServiceMethodsDiscovered"), "No gRPC methods discovered for {ServiceType}.");
+    [LoggerMessage(Level = LogLevel.Trace, EventId = 1, EventName = "AddedServiceMethod", Message = "Added gRPC method '{MethodName}' to service '{ServiceName}'. Method type: {MethodType}, HTTP method: {HttpMethod}, route pattern: '{RoutePattern}'.")]
+    private static partial void AddedServiceMethod(ILogger logger, string methodName, string serviceName, MethodType methodType, string HttpMethod, string routePattern);
 
     public static void AddedServiceMethod(ILogger logger, string methodName, string serviceName, MethodType methodType, IReadOnlyList<string> httpMethods, string routePattern)
     {
@@ -217,17 +168,13 @@ internal static class ServiceRouteBuilderLog
             // There should be one HTTP method here, but concat in case someone has overriden metadata.
             var allHttpMethods = string.Join(',', httpMethods);
 
-            _addedServiceMethod(logger, methodName, serviceName, methodType, allHttpMethods, routePattern, null);
+            AddedServiceMethod(logger, methodName, serviceName, methodType, allHttpMethods, routePattern);
         }
     }
 
-    public static void DiscoveringServiceMethods(ILogger logger, Type serviceType)
-    {
-        _discoveringServiceMethods(logger, serviceType, null);
-    }
+    [LoggerMessage(Level = LogLevel.Trace, EventId = 2, EventName = "DiscoveringServiceMethods", Message = "Discovering gRPC methods for {ServiceType}.")]
+    public static partial void DiscoveringServiceMethods(ILogger logger, Type serviceType);
 
-    public static void NoServiceMethodsDiscovered(ILogger logger, Type serviceType)
-    {
-        _noServiceMethodsDiscovered(logger, serviceType, null);
-    }
+    [LoggerMessage(Level = LogLevel.Debug, EventId = 3, EventName = "NoServiceMethodsDiscovered", Message = "No gRPC methods discovered for {ServiceType}.")]
+    public static partial void NoServiceMethodsDiscovered(ILogger logger, Type serviceType);
 }

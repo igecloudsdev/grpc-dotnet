@@ -17,11 +17,14 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using Grpc.Core.Api.Utils;
-
 using Grpc.Core.Utils;
 
 namespace Grpc.Core;
@@ -35,6 +38,8 @@ namespace Grpc.Core;
 /// <item><term>Response trailers</term><description>are sent by the server at the end of a remote call along with resulting call status.</description></item>
 /// </list>
 /// </summary>
+[DebuggerDisplay("{DebuggerToString(),nq}")]
+[DebuggerTypeProxy(typeof(MetadataDebugView))]
 public sealed class Metadata : IList<Metadata.Entry>
 {
     /// <summary>
@@ -149,7 +154,6 @@ public sealed class Metadata : IList<Metadata.Entry>
 
     #region IList members
 
-
     /// <summary>
     /// <see cref="T:IList`1"/>
     /// </summary>
@@ -163,7 +167,7 @@ public sealed class Metadata : IList<Metadata.Entry>
     /// </summary>
     public void Insert(int index, Metadata.Entry item)
     {
-        GrpcPreconditions.CheckNotNull(item);
+        GrpcPreconditions.CheckNotNull(item, nameof(item));
         CheckWriteable();
         entries.Insert(index, item);
     }
@@ -189,7 +193,7 @@ public sealed class Metadata : IList<Metadata.Entry>
 
         set
         {
-            GrpcPreconditions.CheckNotNull(value);
+            GrpcPreconditions.CheckNotNull(value, nameof(value));
             CheckWriteable();
             entries[index] = value;
         }
@@ -200,7 +204,7 @@ public sealed class Metadata : IList<Metadata.Entry>
     /// </summary>
     public void Add(Metadata.Entry item)
     {
-        GrpcPreconditions.CheckNotNull(item);
+        GrpcPreconditions.CheckNotNull(item, nameof(item));
         CheckWriteable();
         entries.Add(item);
     }
@@ -462,8 +466,10 @@ public sealed class Metadata : IList<Metadata.Entry>
                     '0' <= c && c <= '9' ||
                     c == '.' ||
                     c == '_' ||
-                    c == '-' )
+                    c == '-')
+                {
                     continue;
+                }
 
                 if ('A' <= c && c <= 'Z')
                 {
@@ -497,5 +503,28 @@ public sealed class Metadata : IList<Metadata.Entry>
             }
             return false;
         }
+    }
+
+    private string DebuggerToString()
+    {
+        var debugText = $"Count = {Count}";
+        if (IsReadOnly)
+        {
+            debugText += $", IsReadOnly = true";
+        }
+        return debugText;
+    }
+
+    private sealed class MetadataDebugView
+    {
+        private readonly Metadata _metadata;
+
+        public MetadataDebugView(Metadata metadata)
+        {
+            _metadata = metadata;
+        }
+
+        [DebuggerBrowsable(DebuggerBrowsableState.RootHidden)]
+        public Entry[] Items => _metadata.ToArray();
     }
 }

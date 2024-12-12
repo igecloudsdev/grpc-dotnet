@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -40,16 +40,34 @@ public class ClientChannelTests
 {
     internal class TestBackoffPolicyFactory : IBackoffPolicyFactory
     {
+        private readonly TimeSpan _backoff;
+
+        public TestBackoffPolicyFactory() : this(TimeSpan.FromSeconds(20))
+        {
+        }
+
+        public TestBackoffPolicyFactory(TimeSpan backoff)
+        {
+            _backoff = backoff;
+        }
+
         public IBackoffPolicy Create()
         {
-            return new TestBackoffPolicy();
+            return new TestBackoffPolicy(_backoff);
         }
 
         private class TestBackoffPolicy : IBackoffPolicy
         {
+            private readonly TimeSpan _backoff;
+
+            public TestBackoffPolicy(TimeSpan backoff)
+            {
+                _backoff = backoff;
+            }
+
             public TimeSpan NextBackoff()
             {
-                return TimeSpan.FromSeconds(20);
+                return _backoff;
             }
         }
     }
@@ -62,6 +80,7 @@ public class ClientChannelTests
         services.AddNUnitLogger();
         var serviceProvider = services.BuildServiceProvider();
         var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
+        var logger = loggerFactory.CreateLogger(GetType());
 
         var resolver = new TestResolver(loggerFactory);
         resolver.UpdateAddresses(new List<BalancerAddress>
@@ -86,24 +105,36 @@ public class ClientChannelTests
         // Assert
         Assert.AreEqual(new DnsEndPoint("localhost", 80), result1.Address!.EndPoint);
 
+        logger.LogInformation("Updating resolve to have 80 and 81 addresses.");
         resolver.UpdateAddresses(new List<BalancerAddress>
         {
             new BalancerAddress("localhost", 80),
             new BalancerAddress("localhost", 81)
         });
 
+        logger.LogInformation("Wait for both subchannels to be ready.");
+        await BalancerWaitHelpers.WaitForSubchannelsToBeReadyAsync(logger, clientChannel, expectedCount: 2);
+
+        // This needs to happen after both subchannels are ready so the Transports collection has two items in it.
+        logger.LogInformation("Make subchannels not ready.");
         for (var i = 0; i < transportFactory.Transports.Count; i++)
         {
             transportFactory.Transports[i].UpdateState(ConnectivityState.TransientFailure);
         }
+
+        logger.LogInformation("Wait for both subchannels to not be ready.");
+        await BalancerWaitHelpers.WaitForSubchannelsToBeReadyAsync(logger, clientChannel, expectedCount: 0);
 
         var pickTask2 = clientChannel.PickAsync(
             new PickContext { Request = new HttpRequestMessage() },
             waitForReady: true,
             CancellationToken.None).AsTask().DefaultTimeout();
 
-        Assert.IsFalse(pickTask2.IsCompleted);
+        _ = LogPickComplete(pickTask2, logger);
 
+        Assert.IsFalse(pickTask2.IsCompleted, "PickAsync should wait until an subchannel is ready.");
+
+        logger.LogInformation("Setting to ready subchannel.");
         resolver.UpdateAddresses(new List<BalancerAddress>
         {
             new BalancerAddress("localhost", 82)
@@ -111,6 +142,12 @@ public class ClientChannelTests
 
         var result2 = await pickTask2.DefaultTimeout();
         Assert.AreEqual(new DnsEndPoint("localhost", 82), result2.Address!.EndPoint);
+
+        static async Task LogPickComplete(Task<(Subchannel Subchannel, BalancerAddress Address, ISubchannelCallTracker? SubchannelCallTracker)> pickTask2, ILogger logger)
+        {
+            await pickTask2.DefaultTimeout();
+            logger.LogInformation("PickAsync complete.");
+        }
     }
 
     [Test]
@@ -160,7 +197,7 @@ public class ClientChannelTests
             new BalancerAddress("localhost", 80)
         });
 
-        var transportFactory = new TestSubchannelTransportFactory((s, c) =>
+        var transportFactory = TestSubchannelTransportFactory.Create((s, c) =>
         {
             return Task.FromException<TryConnectResult>(new Exception("Test error!"));
         });
@@ -329,7 +366,7 @@ public class ClientChannelTests
 
         var syncPoint = new SyncPoint(runContinuationsAsynchronously: true);
 
-        var transportFactory = new TestSubchannelTransportFactory(async (s, c) =>
+        var transportFactory = TestSubchannelTransportFactory.Create(async (s, c) =>
         {
             c.Register(state => ((SyncPoint)state!).Continue(), syncPoint);
 
@@ -381,6 +418,7 @@ public class ClientChannelTests
         services.AddNUnitLogger();
         await using var serviceProvider = services.BuildServiceProvider();
         var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
+        var logger = loggerFactory.CreateLogger(GetType());
 
         var resolver = new TestResolver(loggerFactory);
 
@@ -399,11 +437,17 @@ public class ClientChannelTests
             clientChannel));
 
         // Act
+        logger.LogInformation("Client connecting.");
         var connectTask = clientChannel.ConnectAsync(waitForReady: true, cancellationToken: CancellationToken.None);
+
+        logger.LogInformation("Starting pick on connecting channel.");
         var pickTask = clientChannel.PickAsync(
             new PickContext { Request = new HttpRequestMessage() },
             waitForReady: true,
             CancellationToken.None).AsTask();
+
+        logger.LogInformation("Waiting for resolve to complete.");
+        await resolver.HasResolvedTask.DefaultTimeout();
 
         resolver.UpdateAddresses(new List<BalancerAddress>
         {
@@ -411,10 +455,11 @@ public class ClientChannelTests
         });
         await Task.WhenAll(connectTask, pickTask).DefaultTimeout();
 
-        // Simulate transport/network issue
+        logger.LogInformation("Simulate transport/network issue.");
         transportFactory.Transports.ForEach(t => t.Disconnect());
         resolver.UpdateError(new Status(StatusCode.Unavailable, "Test error"));
 
+        logger.LogInformation("Starting pick on disconnected channel.");
         pickTask = clientChannel.PickAsync(
             new PickContext { Request = new HttpRequestMessage() },
             waitForReady: true,
@@ -426,7 +471,10 @@ public class ClientChannelTests
 
         // Assert
         // Should not timeout (deadlock)
+        logger.LogInformation("Wait for pick task to complete.");
         await pickTask.DefaultTimeout();
+
+        logger.LogInformation("Done.");
     }
 
     [Test]
@@ -461,6 +509,8 @@ public class ClientChannelTests
             waitForReady: true,
             CancellationToken.None).AsTask();
 
+        await resolver.HasResolvedTask.DefaultTimeout();
+
         resolver.UpdateAddresses(new List<BalancerAddress>
         {
             new BalancerAddress("localhost", 80)
@@ -485,17 +535,79 @@ public class ClientChannelTests
         await pickTask.DefaultTimeout();
     }
 
+    [Test]
+    public async Task PickAsync_ExecutionContext_DoesNotCaptureAsyncLocalsInConnect()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+        services.AddNUnitLogger();
+        await using var serviceProvider = services.BuildServiceProvider();
+        var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
+
+        var resolver = new TestResolver(loggerFactory);
+
+        GrpcChannelOptions channelOptions = new GrpcChannelOptions();
+        channelOptions.ServiceConfig = new ServiceConfig()
+        {
+            LoadBalancingConfigs = { new RoundRobinConfig() }
+        };
+
+        AsyncLocal<object> asyncLocal = new AsyncLocal<object>();
+        asyncLocal.Value = new object();
+
+        var callbackAsyncLocalValues = new List<object>();
+
+        var transportFactory = TestSubchannelTransportFactory.Create((subchannel, cancellationToken) =>
+        {
+            callbackAsyncLocalValues.Add(asyncLocal.Value);
+            if (callbackAsyncLocalValues.Count >= 2)
+            {
+                return Task.FromResult(new TryConnectResult(ConnectivityState.Ready, ConnectResult.Success));
+            }
+
+            return Task.FromResult(new TryConnectResult(ConnectivityState.TransientFailure, ConnectResult.Failure));
+        });
+        var backoffPolicy = new TestBackoffPolicyFactory(TimeSpan.FromMilliseconds(200));
+        var clientChannel = CreateConnectionManager(loggerFactory, resolver, transportFactory, new[] { new RoundRobinBalancerFactory() }, backoffPolicy);
+        // Configure balancer similar to how GrpcChannel constructor does it
+        clientChannel.ConfigureBalancer(c => new ChildHandlerLoadBalancer(
+            c,
+            channelOptions.ServiceConfig,
+            clientChannel));
+
+        // Act
+        var connectTask = clientChannel.ConnectAsync(waitForReady: true, cancellationToken: CancellationToken.None);
+        var pickTask = clientChannel.PickAsync(
+            new PickContext { Request = new HttpRequestMessage() },
+            waitForReady: true,
+            CancellationToken.None).AsTask();
+
+        await resolver.HasResolvedTask.DefaultTimeout();
+
+        resolver.UpdateAddresses(new List<BalancerAddress>
+        {
+            new BalancerAddress("localhost", 80)
+        });
+        await Task.WhenAll(connectTask, pickTask).DefaultTimeout();
+
+        // Assert
+        Assert.AreEqual(2, callbackAsyncLocalValues.Count);
+        Assert.IsNull(callbackAsyncLocalValues[0]);
+        Assert.IsNull(callbackAsyncLocalValues[1]);
+    }
+
     private static ConnectionManager CreateConnectionManager(
         ILoggerFactory loggerFactory,
         Resolver resolver,
         TestSubchannelTransportFactory transportFactory,
-        LoadBalancerFactory[]? loadBalancerFactories = null)
+        LoadBalancerFactory[]? loadBalancerFactories = null,
+        IBackoffPolicyFactory? backoffPolicyFactory = null)
     {
         return new ConnectionManager(
             resolver,
             disableResolverServiceConfig: false,
             loggerFactory,
-            new TestBackoffPolicyFactory(),
+            backoffPolicyFactory ?? new TestBackoffPolicyFactory(),
             transportFactory,
             loadBalancerFactories ?? Array.Empty<LoadBalancerFactory>());
     }

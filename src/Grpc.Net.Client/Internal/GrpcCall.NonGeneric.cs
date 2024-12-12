@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -53,6 +53,7 @@ internal abstract class GrpcCall
 
     public string? RequestGrpcEncoding { get; internal set; }
 
+    public abstract Task<Status> CallTask { get; }
     public abstract CancellationToken CancellationToken { get; }
     public abstract Type RequestType { get; }
     public abstract Type ResponseType { get; }
@@ -62,6 +63,29 @@ internal abstract class GrpcCall
         Options = options;
         Channel = channel;
         Logger = channel.LoggerFactory.CreateLogger(LoggerName);
+    }
+
+    public Exception CreateCanceledStatusException(Exception? ex = null)
+    {
+        var status = (CallTask.IsCompletedSuccessfully()) ? CallTask.Result : new Status(StatusCode.Cancelled, string.Empty, ex);
+        return CreateRpcException(status);
+    }
+
+    public CancellationToken GetCanceledToken(CancellationToken methodCancellationToken)
+    {
+        if (methodCancellationToken.IsCancellationRequested)
+        {
+            return methodCancellationToken;
+        }
+        else if (Options.CancellationToken.IsCancellationRequested)
+        {
+            return Options.CancellationToken;
+        }
+        else if (CancellationToken.IsCancellationRequested)
+        {
+            return CancellationToken;
+        }
+        return CancellationToken.None;
     }
 
     internal RpcException CreateRpcException(Status status)
@@ -82,6 +106,23 @@ internal abstract class GrpcCall
             GrpcCallLog.ErrorParsingTrailers(Logger, ex);
         }
         return new RpcException(status, trailers ?? Metadata.Empty);
+    }
+
+    public Exception CreateFailureStatusException(Status status)
+    {
+        if (Channel.ThrowOperationCanceledOnCancellation &&
+            (status.StatusCode == StatusCode.DeadlineExceeded || status.StatusCode == StatusCode.Cancelled))
+        {
+            // Convert status response of DeadlineExceeded to OperationCanceledException when
+            // ThrowOperationCanceledOnCancellation is true.
+            // This avoids a race between the client-side timer and the server status throwing different
+            // errors on deadline exceeded.
+            return new OperationCanceledException();
+        }
+        else
+        {
+            return CreateRpcException(status);
+        }
     }
 
     protected bool TryGetTrailers([NotNullWhen(true)] out Metadata? trailers)
@@ -152,7 +193,7 @@ internal abstract class GrpcCall
         switch (httpStatusCode)
         {
             case HttpStatusCode.BadRequest:  // 400
-#if !NETSTANDARD2_0
+#if !NETSTANDARD2_0 && !NET462
             case HttpStatusCode.RequestHeaderFieldsTooLarge: // 431
 #else
             case (HttpStatusCode)431:
@@ -164,7 +205,7 @@ internal abstract class GrpcCall
                 return StatusCode.PermissionDenied;
             case HttpStatusCode.NotFound:  // 404
                 return StatusCode.Unimplemented;
-#if !NETSTANDARD2_0
+#if !NETSTANDARD2_0 && !NET462
             case HttpStatusCode.TooManyRequests:  // 429
 #else
             case (HttpStatusCode)429:

@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -20,6 +20,7 @@
 using Grpc.Core;
 using Grpc.Net.Client.Balancer.Internal;
 using Grpc.Net.Client.Internal;
+using Grpc.Shared;
 using Microsoft.Extensions.Logging;
 
 namespace Grpc.Net.Client.Balancer;
@@ -35,7 +36,7 @@ namespace Grpc.Net.Client.Balancer;
 /// Note: Experimental API that can change or be removed without any prior notice.
 /// </para>
 /// </summary>
-public abstract class PollingResolver : Resolver
+public abstract partial class PollingResolver : Resolver
 {
     // Internal for testing
     internal Task _resolveTask = Task.CompletedTask;
@@ -69,12 +70,9 @@ public abstract class PollingResolver : Resolver
     /// <param name="backoffPolicyFactory">The backoff policy factory.</param>
     protected PollingResolver(ILoggerFactory loggerFactory, IBackoffPolicyFactory? backoffPolicyFactory)
     {
-        if (loggerFactory == null)
-        {
-            throw new ArgumentNullException(nameof(loggerFactory));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(loggerFactory);
 
-        _logger = loggerFactory.CreateLogger<PollingResolver>();
+        _logger = loggerFactory.CreateLogger(typeof(PollingResolver));
         _backoffPolicyFactory = backoffPolicyFactory;
     }
 
@@ -86,12 +84,9 @@ public abstract class PollingResolver : Resolver
     /// </para>
     /// </summary>
     /// <param name="listener">The callback used to receive updates on the target.</param>
-    public override sealed void Start(Action<ResolverResult> listener)
+    public sealed override void Start(Action<ResolverResult> listener)
     {
-        if (listener == null)
-        {
-            throw new ArgumentNullException(nameof(listener));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(listener);
 
         if (_listener != null)
         {
@@ -127,10 +122,8 @@ public abstract class PollingResolver : Resolver
     /// </summary>
     public sealed override void Refresh()
     {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException(GetType().Name);
-        }
+        ObjectDisposedThrowHelper.ThrowIf(_disposed, GetType());
+
         if (_listener == null)
         {
             throw new InvalidOperationException("Resolver hasn't been started.");
@@ -142,12 +135,33 @@ public abstract class PollingResolver : Resolver
 
             if (_resolveTask.IsCompleted)
             {
-                _resolveTask = ResolveNowAsync(_cts.Token);
-                _resolveTask.ContinueWith(static (t, state) =>
+                // Don't capture the current ExecutionContext and its AsyncLocals onto the connect
+                var restoreFlow = false;
+                try
                 {
-                    var pollingResolver = (PollingResolver)state!;
-                    Log.ResolveTaskCompleted(pollingResolver._logger, pollingResolver.GetType());
-                }, this);
+                    if (!ExecutionContext.IsFlowSuppressed())
+                    {
+                        ExecutionContext.SuppressFlow();
+                        restoreFlow = true;
+                    }
+
+                    // Run ResolveAsync in a background task.
+                    // This is done to prevent synchronous block inside ResolveAsync from blocking future Refresh calls.
+                    _resolveTask = Task.Run(() => ResolveNowAsync(_cts.Token));
+                    _resolveTask.ContinueWith(static (t, state) =>
+                    {
+                        var pollingResolver = (PollingResolver)state!;
+                        Log.ResolveTaskCompleted(pollingResolver._logger, pollingResolver.GetType());
+                    }, this);
+                }
+                finally
+                {
+                    // Restore the current ExecutionContext
+                    if (restoreFlow)
+                    {
+                        ExecutionContext.RestoreFlow();
+                    }
+                }
             }
             else
             {
@@ -158,6 +172,8 @@ public abstract class PollingResolver : Resolver
 
     private async Task ResolveNowAsync(CancellationToken cancellationToken)
     {
+        Log.ResolveStarting(_logger, GetType());
+
         // Reset resolve success to false. Will be set to true when an OK result is sent to listener.
         _resolveSuccessful = false;
 
@@ -240,62 +256,70 @@ public abstract class PollingResolver : Resolver
         _disposed = true;
     }
 
-    internal static class Log
+    internal static partial class Log
     {
-        private static readonly Action<ILogger, string, Exception?> _resolverRefreshRequested =
-            LoggerMessage.Define<string>(LogLevel.Trace, new EventId(1, "ResolverRefreshRequested"), "{ResolveType} refresh requested.");
-
-        private static readonly Action<ILogger, string, Exception?> _resolverRefreshIgnored =
-            LoggerMessage.Define<string>(LogLevel.Trace, new EventId(2, "ResolverRefreshIgnored"), "{ResolveType} refresh ignored because resolve is already in progress.");
-
-        private static readonly Action<ILogger, string, Exception> _resolveError =
-            LoggerMessage.Define<string>(LogLevel.Error, new EventId(3, "ResolveError"), "Error resolving {ResolveType}.");
-
-        private static readonly Action<ILogger, string, StatusCode, int, Exception?> _resolveResult =
-            LoggerMessage.Define<string, StatusCode, int>(LogLevel.Trace, new EventId(4, "ResolveResult"), "{ResolveType} result with status code '{StatusCode}' and {AddressCount} addresses.");
-
-        private static readonly Action<ILogger, string, TimeSpan, Exception?> _startingResolveBackoff =
-            LoggerMessage.Define<string, TimeSpan>(LogLevel.Trace, new EventId(5, "StartingResolveBackoff"), "{ResolveType} starting resolve backoff of {BackoffDuration}.");
-
-        private static readonly Action<ILogger, string, Exception> _errorRetryingResolve =
-            LoggerMessage.Define<string>(LogLevel.Error, new EventId(6, "ErrorRetryingResolve"), "{ResolveType} error retrying resolve.");
-
-        private static readonly Action<ILogger, string,Exception?> _resolveTaskCompleted =
-            LoggerMessage.Define<string>(LogLevel.Trace, new EventId(7, "ResolveTaskCompleted"), "{ResolveType} resolve task completed.");
+        [LoggerMessage(Level = LogLevel.Trace, EventId = 1, EventName = "ResolverRefreshRequested", Message = "{ResolveType} refresh requested.")]
+        private static partial void ResolverRefreshRequested(ILogger logger, string resolveType);
 
         public static void ResolverRefreshRequested(ILogger logger, Type resolverType)
         {
-            _resolverRefreshRequested(logger, resolverType.Name, null);
+            ResolverRefreshRequested(logger, resolverType.Name);
         }
+
+        [LoggerMessage(Level = LogLevel.Trace, EventId = 2, EventName = "ResolverRefreshIgnored", Message = "{ResolveType} refresh ignored because resolve is already in progress.")]
+        private static partial void ResolverRefreshIgnored(ILogger logger, string resolveType);
 
         public static void ResolverRefreshIgnored(ILogger logger, Type resolverType)
         {
-            _resolverRefreshIgnored(logger, resolverType.Name, null);
+            ResolverRefreshIgnored(logger, resolverType.Name);
         }
+
+        [LoggerMessage(Level = LogLevel.Error, EventId = 3, EventName = "ResolveError", Message = "Error resolving {ResolveType}.")]
+        private static partial void ResolveError(ILogger logger, string resolveType, Exception ex);
 
         public static void ResolveError(ILogger logger, Type resolverType, Exception ex)
         {
-            _resolveError(logger, resolverType.Name, ex);
+            ResolveError(logger, resolverType.Name, ex);
         }
+
+        [LoggerMessage(Level = LogLevel.Trace, EventId = 4, EventName = "ResolveResult", Message = "{ResolveType} result with status code '{StatusCode}' and {AddressCount} addresses.")]
+        private static partial void ResolveResult(ILogger logger, string resolveType, StatusCode statusCode, int addressCount);
 
         public static void ResolveResult(ILogger logger, Type resolverType, StatusCode statusCode, int addressCount)
         {
-            _resolveResult(logger, resolverType.Name, statusCode, addressCount, null);
+            ResolveResult(logger, resolverType.Name, statusCode, addressCount);
         }
+
+        [LoggerMessage(Level = LogLevel.Trace, EventId = 5, EventName = "StartingResolveBackoff", Message = "{ResolveType} starting resolve backoff of {BackoffDuration}.")]
+        private static partial void StartingResolveBackoff(ILogger logger, string resolveType, TimeSpan BackoffDuration);
 
         public static void StartingResolveBackoff(ILogger logger, Type resolverType, TimeSpan delay)
         {
-            _startingResolveBackoff(logger, resolverType.Name, delay, null);
+            StartingResolveBackoff(logger, resolverType.Name, delay);
         }
+
+        [LoggerMessage(Level = LogLevel.Error, EventId = 6, EventName = "ErrorRetryingResolve", Message = "{ResolveType} error retrying resolve.")]
+        private static partial void ErrorRetryingResolve(ILogger logger, string resolveType, Exception ex);
 
         public static void ErrorRetryingResolve(ILogger logger, Type resolverType, Exception ex)
         {
-            _errorRetryingResolve(logger, resolverType.Name, ex);
+            ErrorRetryingResolve(logger, resolverType.Name, ex);
         }
+
+        [LoggerMessage(Level = LogLevel.Trace, EventId = 7, EventName = "ResolveTaskCompleted", Message = "{ResolveType} resolve task completed.")]
+        private static partial void ResolveTaskCompleted(ILogger logger, string resolveType);
 
         public static void ResolveTaskCompleted(ILogger logger, Type resolverType)
         {
-            _resolveTaskCompleted(logger, resolverType.Name, null);
+            ResolveTaskCompleted(logger, resolverType.Name);
+        }
+
+        [LoggerMessage(Level = LogLevel.Trace, EventId = 8, EventName = "ResolveStarting", Message = "{ResolveType} resolve starting.")]
+        private static partial void ResolveStarting(ILogger logger, string resolveType);
+
+        public static void ResolveStarting(ILogger logger, Type resolverType)
+        {
+            ResolveStarting(logger, resolverType.Name);
         }
     }
 }

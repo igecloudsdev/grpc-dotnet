@@ -17,6 +17,8 @@
 #endregion
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using Grpc.Core.Interceptors;
 using Grpc.Core.Internal;
 using Grpc.Core.Utils;
@@ -84,6 +86,10 @@ public abstract class ClientBase<T> : ClientBase
 /// <summary>
 /// Base class for client-side stubs.
 /// </summary>
+// The call invoker's debug information is specified in DebuggerDisplayAttribute.
+// It can't be concatenated inside ServiceNameDebuggerToString() because it isn't available in ToString.
+[DebuggerDisplay("{ServiceNameDebuggerToString(),nq}{CallInvoker}")]
+[DebuggerTypeProxy(typeof(ClientBaseDebugType))]
 public abstract class ClientBase
 {
     readonly ClientBaseConfiguration configuration;
@@ -141,15 +147,40 @@ public abstract class ClientBase
         get { return this.configuration; }
     }
 
+    internal string ServiceNameDebuggerToString()
+    {
+        var serviceName = ClientDebuggerHelpers.GetServiceName(GetType());
+        if (serviceName == null)
+        {
+            return string.Empty;
+        }
+
+        return $@"Service = ""{serviceName}"", ";
+    }
+
+    internal sealed class ClientBaseDebugType
+    {
+        readonly ClientBase client;
+
+        public ClientBaseDebugType(ClientBase client)
+        {
+            this.client = client;
+        }
+
+        public CallInvoker CallInvoker => client.CallInvoker;
+        public string? Service => ClientDebuggerHelpers.GetServiceName(client.GetType());
+        public List<IMethod>? Methods => ClientDebuggerHelpers.GetServiceMethods(client.GetType());
+    }
+
     /// <summary>
     /// Represents configuration of ClientBase. The class itself is visible to
     /// subclasses, but contents are marked as internal to make the instances opaque.
-    /// The verbose name of this class was chosen to make name clash in generated code 
+    /// The verbose name of this class was chosen to make name clash in generated code
     /// less likely.
     /// </summary>
     protected internal class ClientBaseConfiguration
     {
-        private class ClientBaseConfigurationInterceptor : Interceptor
+        private sealed class ClientBaseConfigurationInterceptor : Interceptor
         {
             readonly Func<IMethod, string?, CallOptions, ClientBaseConfigurationInfo> interceptor;
 
@@ -212,7 +243,7 @@ public abstract class ClientBase
 
         internal ClientBaseConfiguration(CallInvoker undecoratedCallInvoker, string? host)
         {
-            this.undecoratedCallInvoker = GrpcPreconditions.CheckNotNull(undecoratedCallInvoker);
+            this.undecoratedCallInvoker = GrpcPreconditions.CheckNotNull(undecoratedCallInvoker, nameof(undecoratedCallInvoker));
             this.host = host;
         }
 

@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -22,7 +22,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net;
-using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Greet;
@@ -57,23 +56,39 @@ public class PickFirstBalancerTests
         });
 
         services.AddSingleton<ResolverFactory>(new TestResolverFactory(resolver));
-        services.AddSingleton<ISubchannelTransportFactory>(new TestSubchannelTransportFactory());
+
+        var subChannelConnections = new List<Subchannel>();
+        var transportFactory = TestSubchannelTransportFactory.Create((s, c) =>
+        {
+            lock (subChannelConnections)
+            {
+                subChannelConnections.Add(s);
+            }
+            return Task.FromResult(new TryConnectResult(ConnectivityState.Ready));
+        });
+        services.AddSingleton<ISubchannelTransportFactory>(transportFactory);
+
+        var serviceProvider = services.BuildServiceProvider();
+        var logger = serviceProvider.GetRequiredService<ILoggerProvider>().CreateLogger(GetType().FullName!);
 
         var handler = new TestHttpMessageHandler((r, ct) => default!);
         var channelOptions = new GrpcChannelOptions
         {
             Credentials = ChannelCredentials.Insecure,
-            ServiceProvider = services.BuildServiceProvider(),
+            ServiceProvider = serviceProvider,
             HttpHandler = handler
         };
 
         // Act
         var channel = GrpcChannel.ForAddress("test:///localhost", channelOptions);
+        var stateChangedTask = BalancerWaitHelpers.WaitForChannelStateAsync(logger, channel, ConnectivityState.Ready);
         await channel.ConnectAsync();
 
         // Assert
         var subchannels = channel.ConnectionManager.GetSubchannels();
         Assert.AreEqual(1, subchannels.Count);
+
+        await stateChangedTask.DefaultTimeout();
 
         Assert.AreEqual(1, subchannels[0]._addresses.Count);
         Assert.AreEqual(new DnsEndPoint("localhost", 80), subchannels[0]._addresses[0].EndPoint);
@@ -81,12 +96,22 @@ public class PickFirstBalancerTests
 
         resolver.UpdateAddresses(new List<BalancerAddress> { new BalancerAddress("localhost", 81) });
 
+        stateChangedTask = BalancerWaitHelpers.WaitForChannelStateAsync(logger, channel, ConnectivityState.Ready);
+
         var newSubchannels = channel.ConnectionManager.GetSubchannels();
         CollectionAssert.AreEqual(subchannels, newSubchannels);
+
+        await stateChangedTask.DefaultTimeout();
 
         Assert.AreEqual(1, subchannels[0]._addresses.Count);
         Assert.AreEqual(new DnsEndPoint("localhost", 81), subchannels[0]._addresses[0].EndPoint);
         Assert.AreEqual(ConnectivityState.Ready, subchannels[0].State);
+
+        lock (subChannelConnections)
+        {
+            Assert.AreEqual(2, subChannelConnections.Count);
+            Assert.AreSame(subChannelConnections[0], subChannelConnections[1]);
+        }
     }
 
     [Test]
@@ -151,25 +176,32 @@ public class PickFirstBalancerTests
             new BalancerAddress("localhost", 80)
         });
 
-        var transportFactory = new TestSubchannelTransportFactory((s, c) => Task.FromResult(new TryConnectResult(ConnectivityState.TransientFailure)));
+        var transportFactory = TestSubchannelTransportFactory.Create((s, c) => Task.FromResult(new TryConnectResult(ConnectivityState.TransientFailure)));
         services.AddSingleton<ResolverFactory>(new TestResolverFactory(resolver));
         services.AddSingleton<ISubchannelTransportFactory>(transportFactory);
+        var serviceProvider = services.BuildServiceProvider();
+        var logger = serviceProvider.GetRequiredService<ILoggerProvider>().CreateLogger(GetType().FullName!);
 
         var handler = new TestHttpMessageHandler((r, ct) => default!);
         var channelOptions = new GrpcChannelOptions
         {
             Credentials = ChannelCredentials.Insecure,
-            ServiceProvider = services.BuildServiceProvider(),
+            ServiceProvider = serviceProvider,
             HttpHandler = handler
         };
 
         // Act
         var channel = GrpcChannel.ForAddress("test:///localhost", channelOptions);
+        var stateChangedTask = BalancerWaitHelpers.WaitForChannelStateAsync(logger, channel, ConnectivityState.TransientFailure);
         _ = channel.ConnectAsync();
 
         // Assert
+        await resolver.HasResolvedTask.DefaultTimeout();
+
         var subchannels = channel.ConnectionManager.GetSubchannels();
         Assert.AreEqual(1, subchannels.Count);
+
+        await stateChangedTask.DefaultTimeout();
 
         Assert.AreEqual(1, subchannels[0]._addresses.Count);
         Assert.AreEqual(new DnsEndPoint("localhost", 80), subchannels[0]._addresses[0].EndPoint);
@@ -202,7 +234,7 @@ public class PickFirstBalancerTests
         var connectivityState = ConnectivityState.TransientFailure;
 
         services.AddSingleton<ResolverFactory>(new TestResolverFactory(resolver));
-        services.AddSingleton<ISubchannelTransportFactory>(new TestSubchannelTransportFactory(async (s, c) =>
+        services.AddSingleton<ISubchannelTransportFactory>(TestSubchannelTransportFactory.Create(async (s, c) =>
         {
             await syncPoint.WaitToContinue();
             return new TryConnectResult(connectivityState);
@@ -258,7 +290,7 @@ public class PickFirstBalancerTests
         });
 
         var transportConnectCount = 0;
-        var transportFactory = new TestSubchannelTransportFactory((s, c) =>
+        var transportFactory = TestSubchannelTransportFactory.Create((s, c) =>
         {
             transportConnectCount++;
             return Task.FromResult(new TryConnectResult(ConnectivityState.Ready));
@@ -308,7 +340,7 @@ public class PickFirstBalancerTests
         resolver.UpdateAddresses(new List<BalancerAddress> { new BalancerAddress("localhost", 80) });
 
         var transportConnectCount = 0;
-        var transportFactory = new TestSubchannelTransportFactory((s, c) =>
+        var transportFactory = TestSubchannelTransportFactory.Create((s, c) =>
         {
             transportConnectCount++;
             return Task.FromResult(new TryConnectResult(ConnectivityState.Ready));
@@ -353,7 +385,7 @@ public class PickFirstBalancerTests
         resolver.UpdateAddresses(new List<BalancerAddress> { new BalancerAddress("localhost", 80) });
 
         var transportConnectCount = 0;
-        var transportFactory = new TestSubchannelTransportFactory((s, c) =>
+        var transportFactory = TestSubchannelTransportFactory.Create((s, c) =>
         {
             transportConnectCount++;
             return Task.FromResult(new TryConnectResult(ConnectivityState.Ready));
@@ -361,12 +393,14 @@ public class PickFirstBalancerTests
 
         services.AddSingleton<ResolverFactory>(new TestResolverFactory(resolver));
         services.AddSingleton<ISubchannelTransportFactory>(transportFactory);
+        var serviceProvider = services.BuildServiceProvider();
+        var logger = serviceProvider.GetRequiredService<ILoggerProvider>().CreateLogger(GetType().FullName!);
 
         var handler = new TestHttpMessageHandler((r, ct) => default!);
         var channelOptions = new GrpcChannelOptions
         {
             Credentials = ChannelCredentials.Insecure,
-            ServiceProvider = services.BuildServiceProvider(),
+            ServiceProvider = serviceProvider,
             HttpHandler = handler
         };
 
@@ -377,13 +411,16 @@ public class PickFirstBalancerTests
         transportFactory.Transports.Single().UpdateState(ConnectivityState.Idle);
         Assert.AreEqual(ConnectivityState.Idle, channel.State);
 
-        var stateChangedTask = channel.WaitForStateChangedAsync(ConnectivityState.Idle);
+        logger.LogInformation("Waiting for state change from current state of idle.");
+        var stateChangedTask = BalancerWaitHelpers.WaitForChannelStateAsync(logger, channel, ConnectivityState.Ready);
 
+        logger.LogInformation("Starting PickAsync");
         var pick = await channel.ConnectionManager.PickAsync(
             new PickContext { Request = new HttpRequestMessage() },
             waitForReady: false,
             CancellationToken.None).AsTask().DefaultTimeout();
 
+        logger.LogInformation("Waiting for state change to complete");
         await stateChangedTask.DefaultTimeout();
         Assert.AreEqual(ConnectivityState.Ready, channel.State);
         Assert.AreEqual(2, transportConnectCount);
@@ -407,11 +444,11 @@ public class PickFirstBalancerTests
         var resolver = new TestResolver();
         resolver.UpdateAddresses(new List<BalancerAddress> { new BalancerAddress("localhost", 80) });
 
-        ILogger? logger = null;
+        ILogger logger = null!;
 
         var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var transportConnectCount = 0;
-        var transportFactory = new TestSubchannelTransportFactory((s, c) =>
+        var transportFactory = TestSubchannelTransportFactory.Create((s, c) =>
         {
             transportConnectCount++;
 
@@ -469,11 +506,11 @@ public class PickFirstBalancerTests
         var resolver = new TestResolver();
         resolver.UpdateAddresses(new List<BalancerAddress> { new BalancerAddress("localhost", 80) });
 
-        ILogger? logger = null;
+        ILogger logger = null!;
 
         var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var transportConnectCount = 0;
-        var transportFactory = new TestSubchannelTransportFactory((s, c) =>
+        var transportFactory = TestSubchannelTransportFactory.Create((s, c) =>
         {
             transportConnectCount++;
 
@@ -509,12 +546,17 @@ public class PickFirstBalancerTests
         _ = invoker.Channel.ConnectAsync();
 
         // Act
-        var call = invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest());
+        var call = invoker.AsyncUnaryCall(new HelloRequest());
         await tcs.Task.DefaultTimeout();
 
         // Assert
-        var pickStartedCount = testSink.Writes.Count(w => w.EventId.Name == "PickStarted");
-        Assert.AreEqual(1, pickStartedCount);
+        await TestHelpers.AssertIsTrueRetryAsync(
+            () =>
+            {
+                var pickStartedCount = testSink.Writes.Count(w => w.EventId.Name == "PickStarted");
+                return pickStartedCount >= 1;
+            },
+            "Wait for pick started.").DefaultTimeout();
 
         transportFactory.Transports.Single().UpdateState(ConnectivityState.TransientFailure, new Status(StatusCode.Unavailable, "An error"));
 
@@ -539,7 +581,7 @@ public class PickFirstBalancerTests
         var resolver = new TestResolver();
         resolver.UpdateAddresses(new List<BalancerAddress> { new BalancerAddress("localhost", 80) });
 
-        var transportFactory = new TestSubchannelTransportFactory((s, c) =>
+        var transportFactory = TestSubchannelTransportFactory.Create((s, c) =>
         {
             return Task.FromResult(new TryConnectResult(ConnectivityState.Connecting));
         });
@@ -603,7 +645,7 @@ public class PickFirstBalancerTests
         resolver.UpdateAddresses(new List<BalancerAddress> { new BalancerAddress("localhost", 80) });
 
         var tryConnectTcs = new TaskCompletionSource<TryConnectResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var transportFactory = new TestSubchannelTransportFactory((s, ct) =>
+        var transportFactory = TestSubchannelTransportFactory.Create((s, ct) =>
         {
             return tryConnectTcs.Task;
         });

@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -31,11 +31,7 @@ namespace Grpc.AspNetCore.Server.Internal;
 /// <summary>
 /// Creates server call handlers. Provides a place to get services that call handlers will use.
 /// </summary>
-internal partial class ServerCallHandlerFactory<
-#if NET5_0_OR_GREATER
-    [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
-#endif
-    TService> where TService : class
+internal sealed partial class ServerCallHandlerFactory<[DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)] TService> where TService : class
 {
     private readonly ILoggerFactory _loggerFactory;
     private readonly IGrpcServiceActivator<TService> _serviceActivator;
@@ -118,8 +114,10 @@ internal partial class ServerCallHandlerFactory<
 
             var unimplementedMethod = httpContext.Request.RouteValues["unimplementedMethod"]?.ToString() ?? "<unknown>";
             Log.MethodUnimplemented(logger, unimplementedMethod);
-            GrpcEventSource.Log.CallUnimplemented(httpContext.Request.Path.Value!);
-
+            if (GrpcEventSource.Log.IsEnabled())
+            {
+                GrpcEventSource.Log.CallUnimplemented(httpContext.Request.Path.Value!);
+            }
             GrpcProtocolHelpers.SetStatus(GrpcProtocolHelpers.GetTrailersDestination(httpContext.Response), new Status(StatusCode.Unimplemented, "Method is unimplemented."));
             return Task.CompletedTask;
         };
@@ -146,29 +144,21 @@ internal partial class ServerCallHandlerFactory<
 
             var unimplementedService = httpContext.Request.RouteValues["unimplementedService"]?.ToString() ?? "<unknown>";
             Log.ServiceUnimplemented(logger, unimplementedService);
-            GrpcEventSource.Log.CallUnimplemented(httpContext.Request.Path.Value!);
-
+            if (GrpcEventSource.Log.IsEnabled())
+            {
+                GrpcEventSource.Log.CallUnimplemented(httpContext.Request.Path.Value!);
+            }
             GrpcProtocolHelpers.SetStatus(GrpcProtocolHelpers.GetTrailersDestination(httpContext.Response), new Status(StatusCode.Unimplemented, "Service is unimplemented."));
             return Task.CompletedTask;
         };
     }
 }
 
-internal static class ServerCallHandlerFactoryLog
+internal static partial class ServerCallHandlerFactoryLog
 {
-    private static readonly Action<ILogger, string, Exception?> _serviceUnimplemented =
-        LoggerMessage.Define<string>(LogLevel.Information, new EventId(1, "ServiceUnimplemented"), "Service '{ServiceName}' is unimplemented.");
+    [LoggerMessage(Level = LogLevel.Information, EventId = 1, EventName = "ServiceUnimplemented", Message = "Service '{ServiceName}' is unimplemented.")]
+    public static partial void ServiceUnimplemented(ILogger logger, string serviceName);
 
-    private static readonly Action<ILogger, string, Exception?> _methodUnimplemented =
-        LoggerMessage.Define<string>(LogLevel.Information, new EventId(2, "MethodUnimplemented"), "Method '{MethodName}' is unimplemented.");
-
-    public static void ServiceUnimplemented(ILogger logger, string serviceName)
-    {
-        _serviceUnimplemented(logger, serviceName, null);
-    }
-
-    public static void MethodUnimplemented(ILogger logger, string methodName)
-    {
-        _methodUnimplemented(logger, methodName, null);
-    }
+    [LoggerMessage(Level = LogLevel.Information, EventId = 2, EventName = "MethodUnimplemented", Message = "Method '{MethodName}' is unimplemented.")]
+    public static partial void MethodUnimplemented(ILogger logger, string methodName);
 }

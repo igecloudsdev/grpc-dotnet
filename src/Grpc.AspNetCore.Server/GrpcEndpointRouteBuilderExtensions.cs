@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -19,6 +19,7 @@
 using System.Diagnostics.CodeAnalysis;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.AspNetCore.Server.Model.Internal;
+using Grpc.Shared;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -35,16 +36,9 @@ public static class GrpcEndpointRouteBuilderExtensions
     /// <typeparam name="TService">The service type to map requests to.</typeparam>
     /// <param name="builder">The <see cref="IEndpointRouteBuilder"/> to add the route to.</param>
     /// <returns>A <see cref="GrpcServiceEndpointConventionBuilder"/> for endpoints associated with the service.</returns>
-    public static GrpcServiceEndpointConventionBuilder MapGrpcService<
-#if NET5_0_OR_GREATER
-        [DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)]
-#endif
-        TService>(this IEndpointRouteBuilder builder) where TService : class
+    public static GrpcServiceEndpointConventionBuilder MapGrpcService<[DynamicallyAccessedMembers(GrpcProtocolConstants.ServiceAccessibility)] TService>(this IEndpointRouteBuilder builder) where TService : class
     {
-        if (builder == null)
-        {
-            throw new ArgumentNullException(nameof(builder));
-        }
+        ArgumentNullThrowHelper.ThrowIfNull(builder);
 
         ValidateServicesRegistered(builder.ServiceProvider);
 

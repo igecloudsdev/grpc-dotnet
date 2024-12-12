@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -18,18 +18,14 @@
 
 using System.Net;
 
-#if NETSTANDARD2_0
-using ValueTask = System.Threading.Tasks.Task;
-#endif
-
 namespace Grpc.Net.Client.Internal.Http;
 
-internal class PushStreamContent<TRequest, TResponse> : HttpContent
+internal sealed class PushStreamContent<TRequest, TResponse> : HttpContent
     where TRequest : class
     where TResponse : class
 {
     private readonly HttpContentClientStreamWriter<TRequest, TResponse> _streamWriter;
-    private readonly Func<Stream, ValueTask>? _startCallback;
+    private readonly Func<Stream, Task>? _startCallback;
 
     public PushStreamContent(HttpContentClientStreamWriter<TRequest, TResponse> streamWriter)
     {
@@ -39,7 +35,7 @@ internal class PushStreamContent<TRequest, TResponse> : HttpContent
 
     public PushStreamContent(
         HttpContentClientStreamWriter<TRequest, TResponse> streamWriter,
-        Func<Stream, ValueTask>? startCallback) : this(streamWriter)
+        Func<Stream, Task>? startCallback) : this(streamWriter)
     {
         _startCallback = startCallback;
     }
@@ -72,4 +68,10 @@ internal class PushStreamContent<TRequest, TResponse> : HttpContent
     // Hacky. ReadAsStreamAsync does not complete until SerializeToStreamAsync finishes.
     // WARNING: Will run SerializeToStreamAsync again on .NET Framework.
     internal Task PushComplete => ReadAsStreamAsync();
+
+    // Internal for testing.
+    internal Task SerializeToStreamAsync(Stream stream)
+    {
+        return SerializeToStreamAsync(stream, context: null);
+    }
 }

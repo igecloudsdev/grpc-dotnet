@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -21,6 +21,7 @@ using Google.Protobuf;
 using Google.Protobuf.Reflection;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.Core;
+using Grpc.Net.Client;
 using Grpc.Tests.Shared;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
@@ -266,12 +267,12 @@ public class CancellationTests : FunctionalTestBase
         syncPoint.Continue();
 
         // Assert
-        Assert.AreEqual(1, channel.ActiveCalls.Count);
+        await WaitForActiveCallsCountAsync(channel, 1).DefaultTimeout();
         var moveNextTask = call.ResponseStream.MoveNext(CancellationToken.None);
 
         channel.Dispose();
 
-        Assert.AreEqual(0, channel.ActiveCalls.Count);
+        await WaitForActiveCallsCountAsync(channel, 0).DefaultTimeout();
 
         var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => moveNextTask).DefaultTimeout();
         Assert.AreEqual(StatusCode.Cancelled, ex.StatusCode);
@@ -281,6 +282,16 @@ public class CancellationTests : FunctionalTestBase
         await TestHelpers.AssertIsTrueRetryAsync(
             () => HasLog(LogLevel.Information, "GrpcStatusError", "Call failed with gRPC error status. Status code: 'Cancelled', Message: 'gRPC call disposed.'."),
             "Missing client cancellation log.").DefaultTimeout();
+    }
+
+    private static async Task WaitForActiveCallsCountAsync(GrpcChannel channel, int count)
+    {
+        // Active calls is modified after response TCS is completed.
+        // Retry a few times to ensure active calls count is updated.
+        await TestHelpers.AssertIsTrueRetryAsync(() =>
+        {
+            return channel.GetActiveCalls().Length == count;
+        }, $"Assert there are {count} active calls.");
     }
 
     [Test]
@@ -484,6 +495,39 @@ public class CancellationTests : FunctionalTestBase
         // Arrange
         var method = Fixture.DynamicGrpc.AddUnaryMethod<DataMessage, DataMessage>(UnaryMethod);
         var channel = CreateChannel(throwOperationCanceledOnCancellation: true);
+        var client = TestClientFactory.Create(channel, method);
+
+        // Act
+        var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var call = client.UnaryCall(new DataMessage(), new CallOptions(cancellationToken: cts.Token));
+
+        // Assert
+        var ex = await ExceptionAssert.ThrowsAsync<OperationCanceledException>(() => call.ResponseAsync).DefaultTimeout();
+        Assert.AreEqual(cts.Token, ex.CancellationToken);
+        Assert.AreEqual(StatusCode.Cancelled, call.GetStatus().StatusCode);
+    }
+
+    [Test]
+    public async Task Unary_Retry_CancellationImmediately_TokenMatchesSource()
+    {
+        var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<DataMessage> UnaryMethod(DataMessage request, ServerCallContext context)
+        {
+            await tcs.Task;
+            return new DataMessage();
+        }
+
+        SetExpectedErrorsFilter(writeContext =>
+        {
+            return true;
+        });
+
+        // Arrange
+        var method = Fixture.DynamicGrpc.AddUnaryMethod<DataMessage, DataMessage>(UnaryMethod);
+        var serviceConfig = ServiceConfigHelpers.CreateRetryServiceConfig();
+        var channel = CreateChannel(throwOperationCanceledOnCancellation: true, serviceConfig: serviceConfig);
         var client = TestClientFactory.Create(channel, method);
 
         // Act

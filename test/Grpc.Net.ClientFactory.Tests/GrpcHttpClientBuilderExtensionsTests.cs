@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -16,6 +16,7 @@
 
 #endregion
 
+using System.Globalization;
 using System.Net;
 using Greet;
 using Grpc.Core;
@@ -136,7 +137,6 @@ public class GrpcHttpClientBuilderExtensionsTests
     {
         // Arrange
         var services = new ServiceCollection();
-        services.AddGrpcClient<Greeter.GreeterClient>();
         var client = services.AddHttpClient("TestClient");
 
         var ex = Assert.Throws<InvalidOperationException>(() => client.AddInterceptor(() => new CallbackInterceptor(o => { })))!;
@@ -144,6 +144,28 @@ public class GrpcHttpClientBuilderExtensionsTests
 
         ex = Assert.Throws<InvalidOperationException>(() => client.AddInterceptor(s => new CallbackInterceptor(o => { })))!;
         Assert.AreEqual("AddInterceptor must be used with a gRPC client.", ex.Message);
+    }
+
+    [Test]
+    public void AddInterceptor_AddGrpcClientWithoutConfig_NoError()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+        var client = services.AddGrpcClient<Greeter.GreeterClient>();
+
+        // Act
+        client.AddInterceptor(() => new CallbackInterceptor(o => { }));
+    }
+
+    [Test]
+    public void AddInterceptor_AddGrpcClientWithNameAndWithoutConfig_NoError()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+        var client = services.AddGrpcClient<Greeter.GreeterClient>(nameof(Greeter.GreeterClient));
+
+        // Act
+        client.AddInterceptor(() => new CallbackInterceptor(o => { }));
     }
 
     [Test]
@@ -498,7 +520,7 @@ public class GrpcHttpClientBuilderExtensionsTests
 
         var services = new ServiceCollection();
         services
-            .AddScoped<AuthProvider>(s => new AuthProvider((scopeCount++).ToString()))
+            .AddScoped<AuthProvider>(s => new AuthProvider((scopeCount++).ToString(CultureInfo.InvariantCulture)))
             .AddGrpcClient<Greeter.GreeterClient>(o =>
             {
                 o.Address = new Uri("https://localhost");

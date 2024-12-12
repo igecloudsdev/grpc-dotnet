@@ -1,4 +1,4 @@
-﻿#region Copyright notice and license
+#region Copyright notice and license
 
 // Copyright 2019 The gRPC Authors
 //
@@ -19,6 +19,7 @@
 #if SUPPORT_LOAD_BALANCING
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Threading;
@@ -42,6 +43,127 @@ namespace Grpc.Net.Client.Tests.Balancer;
 [TestFixture]
 public class ResolverTests
 {
+    [Test]
+    public async Task Refresh_BlockInsideResolveAsync_ResolverNotBlocked()
+    {
+        // Arrange
+        var waitHandle = new ManualResetEvent(false);
+
+        var services = new ServiceCollection();
+        var testSink = new TestSink();
+        services.AddLogging(b =>
+        {
+            b.AddProvider(new TestLoggerProvider(testSink));
+        });
+        services.AddNUnitLogger();
+        var loggerFactory = services.BuildServiceProvider().GetRequiredService<ILoggerFactory>();
+
+        var logger = loggerFactory.CreateLogger<ResolverTests>();
+        logger.LogInformation("Starting.");
+
+        var lockingResolver = new LockingPollingResolver(loggerFactory, waitHandle);
+        lockingResolver.Start(result => { });
+
+        // Act
+        logger.LogInformation("Refresh call 1. This should block.");
+        var refreshTask1 = Task.Run(lockingResolver.Refresh);
+
+        logger.LogInformation("Refresh call 2. This should complete.");
+        var refreshTask2 = Task.Run(lockingResolver.Refresh);
+
+        // Assert
+        await Task.WhenAny(refreshTask1, refreshTask2).DefaultTimeout();
+
+        logger.LogInformation("Setting wait handle.");
+        waitHandle.Set();
+
+        logger.LogInformation("Finishing.");
+    }
+
+    private class LockingPollingResolver : PollingResolver
+    {
+        private ManualResetEvent? _waitHandle;
+        private readonly object _lock = new();
+
+        public LockingPollingResolver(ILoggerFactory loggerFactory, ManualResetEvent waitHandle) : base(loggerFactory)
+        {
+            _waitHandle = waitHandle;
+        }
+
+        protected override Task ResolveAsync(CancellationToken cancellationToken)
+        {
+            lock (_lock)
+            {
+                // Block the first caller.
+                if (_waitHandle != null)
+                {
+                    _waitHandle.WaitOne();
+                    _waitHandle = null;
+                }
+            }
+
+            Listener(ResolverResult.ForResult(new List<BalancerAddress>
+                {
+                    new BalancerAddress("localhost", 80)
+                }));
+
+            return Task.CompletedTask;
+        }
+    }
+
+    [Test]
+    public async Task Refresh_AsyncLocal_NotCaptured()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+        services.AddNUnitLogger();
+        var loggerFactory = services.BuildServiceProvider().GetRequiredService<ILoggerFactory>();
+
+        var asyncLocal = new AsyncLocal<object>();
+        asyncLocal.Value = new object();
+
+        var callbackAsyncLocalValues = new List<object>();
+
+        var resolver = new CallbackPollingResolver(loggerFactory, new TestBackoffPolicyFactory(TimeSpan.FromMilliseconds(100)), (listener) =>
+        {
+            callbackAsyncLocalValues.Add(asyncLocal.Value);
+            if (callbackAsyncLocalValues.Count >= 2)
+            {
+                listener(ResolverResult.ForResult(new List<BalancerAddress>()));
+            }
+
+            return Task.CompletedTask;
+        });
+
+        var tcs = new TaskCompletionSource<ResolverResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        resolver.Start(result => tcs.TrySetResult(result));
+
+        // Act
+        resolver.Refresh();
+
+        // Assert
+        await tcs.Task.DefaultTimeout();
+
+        Assert.AreEqual(2, callbackAsyncLocalValues.Count);
+        Assert.IsNull(callbackAsyncLocalValues[0]);
+        Assert.IsNull(callbackAsyncLocalValues[1]);
+    }
+
+    private class CallbackPollingResolver : PollingResolver
+    {
+        private readonly Func<Action<ResolverResult>, Task> _callback;
+
+        public CallbackPollingResolver(ILoggerFactory loggerFactory, IBackoffPolicyFactory backoffPolicyFactory, Func<Action<ResolverResult>, Task> callback) : base(loggerFactory, backoffPolicyFactory)
+        {
+            _callback = callback;
+        }
+
+        protected override Task ResolveAsync(CancellationToken cancellationToken)
+        {
+            return _callback(Listener);
+        }
+    }
+
     [Test]
     public async Task Resolver_ResolveNameFromServices_Success()
     {
@@ -197,6 +319,7 @@ public class ResolverTests
     {
         // Arrange
         var services = new ServiceCollection();
+        services.AddNUnitLogger();
         var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var resolver = new TestResolver(NullLoggerFactory.Instance, () => tcs.Task);
@@ -229,19 +352,21 @@ public class ResolverTests
         var currentConnectivityState = ConnectivityState.Ready;
 
         services.AddSingleton<ResolverFactory>(new TestResolverFactory(resolver));
-        services.AddSingleton<ISubchannelTransportFactory>(new TestSubchannelTransportFactory(async (s, c) =>
+        services.AddSingleton<ISubchannelTransportFactory>(TestSubchannelTransportFactory.Create(async (s, i, c) =>
         {
             await syncPoint.WaitToContinue();
             return new TryConnectResult(currentConnectivityState);
         }));
         services.Add(ServiceDescriptor.Singleton<LoadBalancerFactory>(firstLoadBalancerFactory));
         services.Add(ServiceDescriptor.Singleton<LoadBalancerFactory>(secondLoadBalancerFactory));
+        var serviceProvider = services.BuildServiceProvider();
+        var logger = serviceProvider.GetRequiredService<ILoggerProvider>().CreateLogger(GetType().FullName!);
 
         var handler = new TestHttpMessageHandler((r, ct) => default!);
         var channelOptions = new GrpcChannelOptions
         {
             Credentials = ChannelCredentials.Insecure,
-            ServiceProvider = services.BuildServiceProvider(),
+            ServiceProvider = serviceProvider,
             HttpHandler = handler
         };
 
@@ -254,7 +379,7 @@ public class ResolverTests
 
         tcs.SetResult(null);
 
-        // Ensure that channel has processed results
+        logger.LogInformation("Ensure that channel has processed results.");
         await resolver.HasResolvedTask.DefaultTimeout();
 
         var subchannels = channel.ConnectionManager.GetSubchannels();
@@ -268,7 +393,7 @@ public class ResolverTests
         var pick = await channel.ConnectionManager.PickAsync(new PickContext(), true, CancellationToken.None).AsTask().DefaultTimeout();
         Assert.AreEqual(80, pick.Address.EndPoint.Port);
 
-        // Create new SyncPoint so new load balancer is waiting to connect
+        logger.LogInformation("Create new SyncPoint so new load balancer is waiting to connect.");
         syncPoint = new SyncPoint(runContinuationsAsynchronously: false);
 
         result = ResolverResult.ForResult(
@@ -283,15 +408,19 @@ public class ResolverTests
         Assert.AreEqual(1, firstLoadBalancerCreatedCount);
         Assert.AreEqual(1, secondLoadBalancerCreatedCount);
 
-        // Old address is still used because new load balancer is connecting
+        logger.LogInformation("Old address is still used because new load balancer is connecting.");
         pick = await channel.ConnectionManager.PickAsync(new PickContext(), true, CancellationToken.None).AsTask().DefaultTimeout();
         Assert.AreEqual(80, pick.Address.EndPoint.Port);
 
         Assert.IsFalse(firstLoadBalancer!.Disposed);
 
+        logger.LogInformation("Allow sync point to continue and new load balancer to finish connecting.");
         syncPoint!.Continue();
 
-        // New address is used
+        logger.LogInformation("Wait for ready subchannel to come from the new resolver.");
+        await BalancerWaitHelpers.WaitForSubchannelToBeReadyAsync(logger, channel, validateSubchannel: s => s.CurrentAddress?.EndPoint.Port == 81);
+
+        logger.LogInformation("New address is used.");
         pick = await channel.ConnectionManager.PickAsync(new PickContext(), true, CancellationToken.None).AsTask().DefaultTimeout();
         Assert.AreEqual(81, pick.Address.EndPoint.Port);
 
@@ -475,6 +604,135 @@ public class ResolverTests
     {
         var balancer = (ChildHandlerLoadBalancer)channel.ConnectionManager._balancer!;
         return (T?)balancer._current?.LoadBalancer;
+    }
+
+    internal class TestBackoffPolicyFactory : IBackoffPolicyFactory
+    {
+        private readonly TimeSpan _backoff;
+
+        public TestBackoffPolicyFactory() : this(TimeSpan.FromSeconds(20))
+        {
+        }
+
+        public TestBackoffPolicyFactory(TimeSpan backoff)
+        {
+            _backoff = backoff;
+        }
+
+        public IBackoffPolicy Create()
+        {
+            return new TestBackoffPolicy(_backoff);
+        }
+
+        private class TestBackoffPolicy : IBackoffPolicy
+        {
+            private readonly TimeSpan _backoff;
+
+            public TestBackoffPolicy(TimeSpan backoff)
+            {
+                _backoff = backoff;
+            }
+
+            public TimeSpan NextBackoff()
+            {
+                return _backoff;
+            }
+        }
+    }
+
+    [Test]
+    public async Task Resolver_UpdateResultsAfterPreviousConnect_InterruptConnect()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+
+        // add logger
+        services.AddNUnitLogger();
+        var loggerFactory = services.BuildServiceProvider().GetRequiredService<ILoggerFactory>();
+        var logger = loggerFactory.CreateLogger<ResolverTests>();
+
+        // add resolver and balancer
+        var resolver = new TestResolver(loggerFactory);
+        var result = ResolverResult.ForResult(new List<BalancerAddress> { new BalancerAddress("localhost", 80) }, serviceConfig: null, serviceConfigStatus: null);
+        resolver.UpdateResult(result);
+
+        services.AddSingleton<ResolverFactory>(new TestResolverFactory(resolver));
+        services.AddSingleton<IBackoffPolicyFactory>(new TestBackoffPolicyFactory(TimeSpan.FromSeconds(0.2)));
+
+        var tryConnectData = new List<(IReadOnlyList<BalancerAddress> BalancerAddresses, int Attempt, bool IsCancellationRequested)>();
+
+        var tryConnectCount = 0;
+        services.AddSingleton<ISubchannelTransportFactory>(
+            TestSubchannelTransportFactory.Create((subchannel, attempt, cancellationToken) =>
+            {
+                var addresses = subchannel.GetAddresses();
+                var isCancellationRequested = cancellationToken.IsCancellationRequested;
+                ConnectivityState state;
+
+                var i = Interlocked.Increment(ref tryConnectCount);
+                if (i == 1)
+                {
+                    state = ConnectivityState.Ready;
+                }
+                else
+                {
+                    state = attempt >= 2 ? ConnectivityState.Ready : ConnectivityState.TransientFailure;
+                }
+
+                logger.LogInformation("TryConnect attempt {Attempt} to addresses {Addresses}. State: {ConnectivityState}, IsCancellationRequested: {IsCancellationRequested}", attempt, string.Join(", ", addresses), state, isCancellationRequested);
+
+                lock (tryConnectData)
+                {
+                    tryConnectData.Add((addresses, attempt, isCancellationRequested));
+                }
+
+                return Task.FromResult(new TryConnectResult(state));
+            }));
+
+        var channelOptions = new GrpcChannelOptions
+        {
+            Credentials = ChannelCredentials.Insecure,
+            ServiceProvider = services.BuildServiceProvider(),
+        };
+
+        // Act
+        var channel = GrpcChannel.ForAddress("test:///test_addr", channelOptions);
+
+        logger.LogInformation("Client connecting.");
+        await channel.ConnectionManager.ConnectAsync(waitForReady: true, CancellationToken.None);
+
+        logger.LogInformation("Client updating resolver.");
+        result = ResolverResult.ForResult(new List<BalancerAddress> { new BalancerAddress("localhost", 81) }, serviceConfig: null, serviceConfigStatus: null);
+        resolver.UpdateResult(result);
+
+        logger.LogInformation("Client picking.");
+        await ExceptionAssert.ThrowsAsync<RpcException>(async () => await channel.ConnectionManager.PickAsync(
+            new PickContext(),
+            waitForReady: false,
+            CancellationToken.None));
+
+        logger.LogInformation("Client updating Resolver.");
+        result = ResolverResult.ForResult(new List<BalancerAddress> { new BalancerAddress("localhost", 82) }, serviceConfig: null, serviceConfigStatus: null);
+        resolver.UpdateResult(result);
+
+        logger.LogInformation("Client picking and waiting for ready.");
+        await channel.ConnectionManager.PickAsync(
+            new PickContext(),
+            waitForReady: true,
+            CancellationToken.None);
+
+        // Assert
+        logger.LogInformation("TryConnectData count: {Count}", tryConnectData.Count);
+        foreach (var data in tryConnectData)
+        {
+            logger.LogInformation("Attempt: {Attempt}, BalancerAddresses: {BalancerAddresses}, IsCancellationRequested: {IsCancellationRequested}", data.Attempt, string.Join(", ", data.BalancerAddresses), data.IsCancellationRequested);
+        }
+
+        var duplicate = tryConnectData.GroupBy(d => new { Address = d.BalancerAddresses.Single(), d.Attempt }).FirstOrDefault(g => g.Count() >= 2);
+        if (duplicate != null)
+        {
+            Assert.Fail($"Duplicate attempts to address. Count: {duplicate.Count()}, Address: {duplicate.Key.Address}");
+        }
     }
 }
 #endif

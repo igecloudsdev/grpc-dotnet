@@ -17,9 +17,6 @@
 #endregion
 
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
-
-using Grpc.Core.Internal;
 using Grpc.Core.Utils;
 
 namespace Grpc.Core;
@@ -56,7 +53,7 @@ public abstract class CallCredentials
     /// </summary>
     public abstract void InternalPopulateConfiguration(CallCredentialsConfiguratorBase configurator, object? state);
 
-    private class CompositeCallCredentials : CallCredentials
+    private sealed class CompositeCallCredentials : CallCredentials
     {
         readonly IReadOnlyList<CallCredentials> credentials;
 
@@ -72,13 +69,13 @@ public abstract class CallCredentials
         }
     }
 
-    private class AsyncAuthInterceptorCredentials : CallCredentials
+    private sealed class AsyncAuthInterceptorCredentials : CallCredentials
     {
         readonly AsyncAuthInterceptor interceptor;
 
         public AsyncAuthInterceptorCredentials(AsyncAuthInterceptor interceptor)
         {
-            this.interceptor = GrpcPreconditions.CheckNotNull(interceptor);
+            this.interceptor = GrpcPreconditions.CheckNotNull(interceptor, nameof(interceptor));
         }
 
         public override void InternalPopulateConfiguration(CallCredentialsConfiguratorBase configurator, object? state)
